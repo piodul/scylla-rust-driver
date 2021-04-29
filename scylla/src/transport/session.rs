@@ -660,27 +660,6 @@ impl Session {
         let cluster_data = self.cluster.get_data();
         let query_plan = self.load_balancer.plan(&statement_info, &cluster_data);
 
-        // If a speculative execuion policy is used to run query, query_plan has to be shared
-        // between different async functions. This struct helps to wrap query_plan in mutex so it
-        // can be shared safely.
-        struct SharedPlan<I>
-        where
-            I: Iterator<Item = Arc<Node>>,
-        {
-            iter: Arc<std::sync::Mutex<I>>,
-        }
-
-        impl<I> Iterator for &SharedPlan<I>
-        where
-            I: Iterator<Item = Arc<Node>>,
-        {
-            type Item = Arc<Node>;
-
-            fn next(&mut self) -> Option<Self::Item> {
-                self.iter.lock().unwrap().next()
-            }
-        }
-
         let retry_policy = match &statement_config.retry_policy {
             Some(policy) => policy,
             None => &self.retry_policy,
@@ -693,37 +672,120 @@ impl Session {
 
         match speculative_policy {
             Some(speculative) if statement_config.is_idempotent => {
-                let shared_query_plan = SharedPlan {
-                    iter: Arc::new(std::sync::Mutex::new(query_plan)),
-                };
-
-                let execute_query_generator = || {
-                    self.execute_query(
-                        &shared_query_plan,
-                        statement_config.is_idempotent,
-                        statement_config.consistency,
-                        retry_policy.new_session(),
-                        &choose_connection,
-                        &do_query,
-                    )
-                };
-
-                speculative.execute(execute_query_generator).await
-            }
-            _ => self
-                .execute_query(
+                self.execute_with_speculation(
                     query_plan,
                     statement_config.is_idempotent,
                     statement_config.consistency,
                     retry_policy.new_session(),
                     &choose_connection,
                     &do_query,
+                    speculative.attempts_count,
+                    speculative.delay,
                 )
                 .await
-                .unwrap_or(Err(QueryError::ProtocolError(
-                    "Empty query plan - driver bug!",
-                ))),
+            }
+            _ => {
+                self.execute_with_speculation(
+                    query_plan,
+                    statement_config.is_idempotent,
+                    statement_config.consistency,
+                    retry_policy.new_session(),
+                    &choose_connection,
+                    &do_query,
+                    0,
+                    std::time::Duration::from_secs(0),
+                )
+                .await
+            }
         }
+    }
+
+    async fn execute_with_speculation<ConnFut, QueryFut, ResT>(
+        &self,
+        mut query_plan: impl Iterator<Item = Arc<Node>>,
+        is_idempotent: bool,
+        consistency: Consistency,
+        mut retry_session: Box<dyn RetrySession>,
+        choose_connection: impl Fn(Arc<Node>) -> ConnFut,
+        do_query: impl Fn(Arc<Connection>) -> QueryFut,
+        mut speculative_retries_remaining: usize,
+        speculative_retry_interval: std::time::Duration,
+    ) -> Result<ResT, QueryError>
+    where
+        ConnFut: Future<Output = Result<Arc<Connection>, QueryError>>,
+        QueryFut: Future<Output = Result<ResT, QueryError>>,
+    {
+        use futures::future::{Fuse, FutureExt};
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        let mut async_tasks = FuturesUnordered::new();
+
+        let sleep = if speculative_retries_remaining > 0 {
+            speculative_retries_remaining -= 1;
+            tokio::time::sleep(speculative_retry_interval).fuse()
+        } else {
+            Fuse::terminated()
+        };
+        tokio::pin!(sleep);
+
+        let mut current_node = query_plan.next();
+        let mut last_error = None;
+
+        // TODO: Metrics!
+
+        loop {
+            if let Some(node) = current_node.as_ref() {
+                let conn = match choose_connection(node.clone()).await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        last_error = Some(e);
+                        current_node = query_plan.next();
+                        continue;
+                    }
+                };
+                async_tasks.push(do_query(conn));
+            }
+
+            if async_tasks.is_empty() {
+                break;
+            }
+
+            futures::select! {
+                _ = &mut sleep => {
+                    if speculative_retries_remaining > 0 {
+                        speculative_retries_remaining -= 1;
+                        sleep.set(tokio::time::sleep(speculative_retry_interval).fuse());
+                    }
+                    // A new task will be created in the next iteration
+                }
+                res = async_tasks.select_next_some() => {
+                    match res {
+                        Ok(res) => return Ok(res),
+                        Err(error) => {
+                            // Use retry policy to decide what to do next
+                            let query_info = QueryInfo {
+                                error: &error,
+                                is_idempotent,
+                                consistency,
+                            };
+
+                            match retry_session.decide_should_retry(query_info) {
+                                RetryDecision::RetrySameNode => {}
+                                RetryDecision::RetryNextNode => {
+                                    current_node = query_plan.next();
+                                }
+                                RetryDecision::DontRetry => {
+                                    current_node = None;
+                                },
+                            };
+                            last_error = Some(error);
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or(QueryError::ProtocolError("Empty query plan - driver bug?")))
     }
 
     async fn execute_query<ConnFut, QueryFut, ResT>(
