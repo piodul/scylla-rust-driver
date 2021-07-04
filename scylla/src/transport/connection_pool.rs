@@ -24,6 +24,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, trace, warn};
 
 /// The target size of a per-node connection pool.
+#[derive(Debug, Clone)]
 pub enum PoolSize {
     /// Indicates that the pool should establish given number of connections to the node.
     ///
@@ -44,6 +45,23 @@ pub enum PoolSize {
 impl Default for PoolSize {
     fn default() -> Self {
         PoolSize::PerShard(NonZeroUsize::new(1).unwrap())
+    }
+}
+
+#[derive(Clone)]
+pub struct PoolConfig {
+    pub connection_config: ConnectionConfig,
+    pub pool_size: PoolSize,
+    pub can_use_shard_aware_port: bool,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            connection_config: Default::default(),
+            pool_size: Default::default(),
+            can_use_shard_aware_port: true,
+        }
     }
 }
 
@@ -78,8 +96,7 @@ impl NodeConnectionPool {
     pub fn new(
         address: IpAddr,
         port: u16,
-        connection_config: ConnectionConfig,
-        refill_goal: PoolSize,
+        pool_config: PoolConfig,
         current_keyspace: Option<VerifiedKeyspaceName>,
     ) -> Self {
         let (use_keyspace_request_sender, use_keyspace_request_receiver) = mpsc::channel(1);
@@ -88,8 +105,7 @@ impl NodeConnectionPool {
         let mut refiller = PoolRefiller::new(
             address,
             port,
-            connection_config,
-            refill_goal,
+            pool_config,
             current_keyspace,
             use_keyspace_request_receiver,
             pool_updated_notify.clone(),
@@ -242,9 +258,7 @@ struct PoolRefiller {
     // Following information identify the pool and do not change
     address: IpAddr,
     regular_port: u16,
-    connection_config: ConnectionConfig,
-    goal: PoolSize,
-    can_open_shard_aware_port_connections: bool,
+    pool_config: PoolConfig,
 
     // Following fields are updated with information from OPTIONS
     shard_aware_port: Option<u16>,
@@ -294,8 +308,7 @@ impl PoolRefiller {
     pub fn new(
         address: IpAddr,
         port: u16,
-        connection_config: ConnectionConfig,
-        refill_goal: PoolSize,
+        pool_config: PoolConfig,
         current_keyspace: Option<VerifiedKeyspaceName>,
         use_keyspace_request_receiver: mpsc::Receiver<UseKeyspaceRequest>,
         pool_updated_notify: Arc<Notify>,
@@ -311,9 +324,7 @@ impl PoolRefiller {
         Self {
             address,
             regular_port: port,
-            connection_config,
-            goal: refill_goal,
-            can_open_shard_aware_port_connections: true,
+            pool_config,
 
             shard_aware_port: None,
             sharder: None,
@@ -422,7 +433,7 @@ impl PoolRefiller {
         let shard_count = self.conns.len();
 
         // Calculate the desired connection count
-        let target_count = match self.goal {
+        let target_count = match self.pool_config.pool_size {
             PoolSize::PerHost(target) => target.get(),
             PoolSize::PerShard(target) => target.get() * shard_count,
         };
@@ -439,7 +450,7 @@ impl PoolRefiller {
 
         match (self.sharder.as_ref(), self.shard_aware_port) {
             (Some(sharder), Some(shard_aware_port))
-                if self.can_open_shard_aware_port_connections =>
+                if self.pool_config.can_use_shard_aware_port =>
             {
                 // Try to fill up each shard up to `per_shard_target` connections
                 for (shard_id, shard_conns) in self.conns.iter().enumerate() {
@@ -458,7 +469,7 @@ impl PoolRefiller {
                         opened_connection_futs.push(open_connection(
                             self.address,
                             self.regular_port,
-                            self.connection_config.clone(),
+                            self.pool_config.connection_config.clone(),
                             self.current_keyspace.clone(),
                             Some(sinfo.clone()),
                         ));
@@ -486,7 +497,7 @@ impl PoolRefiller {
                     opened_connection_futs.push(open_connection(
                         self.address,
                         self.regular_port,
-                        self.connection_config.clone(),
+                        self.pool_config.connection_config.clone(),
                         self.current_keyspace.clone(),
                         None,
                     ));
@@ -518,7 +529,7 @@ impl PoolRefiller {
                         opened_connection_futs.push(open_connection(
                             self.address,
                             self.regular_port,
-                            self.connection_config.clone(),
+                            self.pool_config.connection_config.clone(),
                             self.current_keyspace.clone(),
                             None,
                         ));
@@ -590,7 +601,7 @@ impl PoolRefiller {
                         opened_connection_futs.push(open_connection(
                             self.address,
                             self.regular_port,
-                            self.connection_config.clone(),
+                            self.pool_config.connection_config.clone(),
                             self.current_keyspace.clone(),
                             None,
                         ));
