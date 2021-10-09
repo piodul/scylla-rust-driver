@@ -211,6 +211,12 @@ impl ClusterData {
         }
     }
 
+    pub async fn wait_until_all_pools_are_initialized(&self) {
+        for node in self.all_nodes.iter() {
+            node.wait_until_pool_initialized().await;
+        }
+    }
+
     /// Creates new ClusterData using information about topology held in `info`.
     /// Uses provided `known_peers` hashmap to recycle nodes if possible.
     pub fn new(
@@ -431,6 +437,10 @@ impl ClusterWorker {
             &cluster_data.known_peers,
             &self.used_keyspace,
         ));
+
+        new_cluster_data
+            .wait_until_all_pools_are_initialized()
+            .await;
 
         self.update_cluster_data(new_cluster_data);
 

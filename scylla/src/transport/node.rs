@@ -87,6 +87,10 @@ impl Node {
     pub fn get_working_connections(&self) -> Result<Vec<Arc<Connection>>, QueryError> {
         self.pool.get_working_connections()
     }
+
+    pub async fn wait_until_pool_initialized(&self) {
+        self.pool.wait_until_initialized().await
+    }
 }
 
 impl PartialEq for Node {
