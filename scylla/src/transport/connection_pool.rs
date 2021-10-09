@@ -349,10 +349,6 @@ impl PoolRefiller {
     pub async fn run(mut self) {
         debug!("[{}] Started asynchronous pool worker", self.address);
 
-        // The pool will be attempted to be filled before the worker is run,
-        // so it might be full already. However, calling full() on a full pool
-        // does nothing so it does not hurt to do it again. We do it without
-        // any delay - this immediate retry happens only once in pool's lifetime.
         let next_refill_time = tokio::time::sleep(Duration::from_secs(0)).fuse();
         tokio::pin!(next_refill_time);
 
