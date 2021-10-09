@@ -102,7 +102,7 @@ impl NodeConnectionPool {
         let (use_keyspace_request_sender, use_keyspace_request_receiver) = mpsc::channel(1);
         let pool_updated_notify = Arc::new(Notify::new());
 
-        let mut refiller = PoolRefiller::new(
+        let refiller = PoolRefiller::new(
             address,
             port,
             pool_config,
