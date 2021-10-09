@@ -20,7 +20,6 @@ use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
-use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, trace, warn};
 
 /// The target size of a per-node connection pool.
@@ -359,13 +358,11 @@ impl PoolRefiller {
 
         let mut refill_backoff = MIN_FILL_BACKOFF;
 
-        let use_keyspace_request_receiver = self.use_keyspace_request_receiver.take().unwrap();
-        let mut use_keyspace_request_stream =
-            ReceiverStream::new(use_keyspace_request_receiver).fuse();
+        let mut use_keyspace_request_receiver = self.use_keyspace_request_receiver.take().unwrap();
 
         loop {
-            futures::select! {
-                _ = &mut next_refill_time => {
+            tokio::select! {
+                _ = &mut next_refill_time, if !next_refill_time.is_terminated() => {
                     let result = self.fill().await;
 
                     if result.is_full {
@@ -405,7 +402,7 @@ impl PoolRefiller {
                     }
                 }
 
-                req = use_keyspace_request_stream.next() => {
+                req = use_keyspace_request_receiver.recv() => {
                     match req {
                         None => {
                             // The keyspace request channel is dropped.
