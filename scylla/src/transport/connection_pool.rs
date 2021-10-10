@@ -106,12 +106,11 @@ impl NodeConnectionPool {
             port,
             pool_config,
             current_keyspace,
-            use_keyspace_request_receiver,
             pool_updated_notify.clone(),
         );
 
         let conns = refiller.get_shared_connections();
-        let (fut, handle) = refiller.run().remote_handle();
+        let (fut, handle) = refiller.run(use_keyspace_request_receiver).remote_handle();
         tokio::spawn(fut);
 
         Self {
@@ -286,7 +285,6 @@ struct PoolRefiller {
     excess_connections: Vec<Arc<Connection>>,
 
     current_keyspace: Option<VerifiedKeyspaceName>,
-    use_keyspace_request_receiver: Option<mpsc::Receiver<UseKeyspaceRequest>>,
 
     // Signaled when the connection pool is updated
     pool_updated_notify: Arc<Notify>,
@@ -309,7 +307,6 @@ impl PoolRefiller {
         port: u16,
         pool_config: PoolConfig,
         current_keyspace: Option<VerifiedKeyspaceName>,
-        use_keyspace_request_receiver: mpsc::Receiver<UseKeyspaceRequest>,
         pool_updated_notify: Arc<Notify>,
     ) -> Self {
         // At the beginning, we assume the node does not have any shards
@@ -336,7 +333,6 @@ impl PoolRefiller {
             excess_connections: Vec::new(),
 
             current_keyspace,
-            use_keyspace_request_receiver: Some(use_keyspace_request_receiver),
 
             pool_updated_notify,
         }
@@ -346,15 +342,16 @@ impl PoolRefiller {
         self.shared_conns.clone()
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(
+        mut self,
+        mut use_keyspace_request_receiver: mpsc::Receiver<UseKeyspaceRequest>,
+    ) {
         debug!("[{}] Started asynchronous pool worker", self.address);
 
         let next_refill_time = tokio::time::sleep(Duration::from_secs(0)).fuse();
         tokio::pin!(next_refill_time);
 
         let mut refill_backoff = MIN_FILL_BACKOFF;
-
-        let mut use_keyspace_request_receiver = self.use_keyspace_request_receiver.take().unwrap();
 
         loop {
             tokio::select! {
