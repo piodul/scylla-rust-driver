@@ -6,11 +6,7 @@ use crate::transport::{
 };
 
 use arc_swap::ArcSwap;
-use futures::{
-    future::{FusedFuture, RemoteHandle},
-    stream::FuturesUnordered,
-    Future, FutureExt, StreamExt,
-};
+use futures::{future::RemoteHandle, stream::FuturesUnordered, Future, FutureExt, StreamExt};
 use rand::Rng;
 use std::convert::TryInto;
 use std::io::ErrorKind;
@@ -248,9 +244,37 @@ impl NodeConnectionPool {
 const EXCESS_CONNECTION_BOUND_PER_SHARD_MULTIPLIER: usize = 10;
 
 // TODO: Make it configurable through a policy (issue #184)
-const MIN_FILL_BACKOFF: Duration = Duration::from_millis(250);
+const MIN_FILL_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_FILL_BACKOFF: Duration = Duration::from_secs(10);
 const FILL_BACKOFF_MULTIPLIER: u32 = 2;
+
+// A simple exponential strategy for pool fill backoffs.
+struct RefillDelayStrategy {
+    current_delay: Duration,
+}
+
+impl RefillDelayStrategy {
+    fn new() -> Self {
+        Self {
+            current_delay: MIN_FILL_BACKOFF,
+        }
+    }
+
+    fn get_delay(&self) -> Duration {
+        self.current_delay
+    }
+
+    fn on_pool_full(&mut self) {
+        self.current_delay = MIN_FILL_BACKOFF;
+    }
+
+    fn on_fill_error(&mut self) {
+        self.current_delay = std::cmp::min(
+            MAX_FILL_BACKOFF,
+            self.current_delay * FILL_BACKOFF_MULTIPLIER,
+        );
+    }
+}
 
 struct PoolRefiller {
     // Following information identify the pool and do not change
@@ -265,6 +289,18 @@ struct PoolRefiller {
     // `shared_conns` is updated only after `conns` change
     shared_conns: Arc<ArcSwap<MaybePoolConnections>>,
     conns: Vec<Vec<Arc<Connection>>>,
+
+    // Set to true if there was an error since the last refill,
+    // set to false when refilling starts.
+    had_error_since_last_refill: bool,
+
+    refill_delay_strategy: RefillDelayStrategy,
+
+    // Receives information about connections becoming ready, i.e. newly connected
+    // or after its keyspace was correctly set.
+    // TODO: This should probably be a channel
+    ready_connections:
+        FuturesUnordered<Pin<Box<dyn Future<Output = OpenedConnectionEvent> + Send + 'static>>>,
 
     // Receives information about breaking connections
     connection_errors:
@@ -296,11 +332,6 @@ struct UseKeyspaceRequest {
     response_sender: tokio::sync::oneshot::Sender<Result<(), QueryError>>,
 }
 
-struct FillResult {
-    is_full: bool,
-    had_error: bool,
-}
-
 impl PoolRefiller {
     pub fn new(
         address: IpAddr,
@@ -328,6 +359,10 @@ impl PoolRefiller {
             shared_conns,
             conns,
 
+            had_error_since_last_refill: false,
+            refill_delay_strategy: RefillDelayStrategy::new(),
+
+            ready_connections: FuturesUnordered::new(),
             connection_errors: FuturesUnordered::new(),
 
             excess_connections: Vec::new(),
@@ -342,42 +377,39 @@ impl PoolRefiller {
         self.shared_conns.clone()
     }
 
+    // The main loop of the pool refiller
     pub async fn run(
         mut self,
         mut use_keyspace_request_receiver: mpsc::Receiver<UseKeyspaceRequest>,
     ) {
         debug!("[{}] Started asynchronous pool worker", self.address);
 
-        let next_refill_time = tokio::time::sleep(Duration::from_secs(0)).fuse();
-        tokio::pin!(next_refill_time);
-
-        let mut refill_backoff = MIN_FILL_BACKOFF;
+        let mut next_refill_time = tokio::time::Instant::now();
+        let mut refill_scheduled = true;
 
         loop {
             tokio::select! {
-                _ = &mut next_refill_time, if !next_refill_time.is_terminated() => {
-                    let result = self.fill().await;
+                _ = tokio::time::sleep_until(next_refill_time), if refill_scheduled => {
+                    self.had_error_since_last_refill = false;
+                    self.start_filling();
+                    refill_scheduled = false;
+                }
 
-                    if result.is_full {
-                        debug!("[{}] Pool is full, clearing {} excess connections", self.address, self.excess_connections.len());
-                        refill_backoff = MIN_FILL_BACKOFF;
+                evt = self.ready_connections.select_next_some(), if !self.ready_connections.is_empty() => {
+                    self.handle_ready_connection(evt);
+
+                    if self.is_full() {
+                        self.refill_delay_strategy.on_pool_full();
+                        debug!(
+                            "[{}] Pool is full, clearing {} excess connections",
+                            self.address,
+                            self.excess_connections.len()
+                        );
                         self.excess_connections.clear();
-                    } else {
-                        if !result.had_error {
-                            refill_backoff = MIN_FILL_BACKOFF;
-                            debug!("[{}] Encountered no errors during last refill, but the pool is not full yet", self.address);
-                        } else {
-                            debug!("[{}] Encountered errors during last refill", self.address);
-                        }
-                        debug!("[{}] Scheduling next refill in {} ms", self.address, refill_backoff.as_millis());
-                        next_refill_time.set(tokio::time::sleep(refill_backoff).fuse());
-                        if result.had_error {
-                            refill_backoff = std::cmp::min(MAX_FILL_BACKOFF, refill_backoff * FILL_BACKOFF_MULTIPLIER);
-                        }
                     }
                 }
 
-                evt = self.connection_errors.select_next_some() => {
+                evt = self.connection_errors.select_next_some(), if !self.connection_errors.is_empty() => {
                     if let Some(conn) = evt.connection.upgrade() {
                         debug!("[{}] Got error for connection {:p}: {:?}", self.address, Arc::as_ptr(&conn), evt.error);
 
@@ -386,12 +418,6 @@ impl PoolRefiller {
 
                         // Update the shared pool immediately
                         self.update_shared_conns();
-                    }
-
-                    // Reschedule filling, if it wasn't done already
-                    if next_refill_time.is_terminated() {
-                        debug!("[{}] Scheduling next refill in {} ms", self.address, refill_backoff.as_millis());
-                        next_refill_time.set(tokio::time::sleep(refill_backoff).fuse());
                     }
                 }
 
@@ -405,20 +431,56 @@ impl PoolRefiller {
                             return;
                         }
                         Some(req) => {
-                            debug!("[{}] Requested keyspace change request: {}", self.address, req.keyspace_name.as_str());
-                            let res = self.use_keyspace(&req.keyspace_name).await;
-                            match req.response_sender.send(res) {
-                                Ok(()) => debug!("[{}] Successfully changed current keyspace", self.address),
-                                Err(err) => warn!("[{}] Failed to change keyspace: {:?}", self.address, err),
-                            }
+                            debug!("[{}] Requested keyspace change: {}", self.address, req.keyspace_name.as_str());
+                            let fut = self.use_keyspace(&req.keyspace_name);
+                            let address = self.address;
+                            tokio::task::spawn(async move {
+                                let res = fut.await;
+                                match &res {
+                                    Ok(()) => debug!("[{}] Successfully changed current keyspace", address),
+                                    Err(err) => warn!("[{}] Failed to change keyspace: {:?}", address, err),
+                                }
+                                let _ = req.response_sender.send(res);
+                            });
                         }
                     }
                 }
             }
+
+            // Schedule refilling here
+            if !refill_scheduled && self.need_filling() {
+                if self.had_error_since_last_refill {
+                    self.refill_delay_strategy.on_fill_error();
+                }
+                let delay = self.refill_delay_strategy.get_delay();
+                debug!(
+                    "[{}] Scheduling next refill in {} ms",
+                    self.address,
+                    delay.as_millis(),
+                );
+
+                next_refill_time = tokio::time::Instant::now() + delay;
+                refill_scheduled = true;
+            }
         }
     }
 
-    async fn fill(&mut self) -> FillResult {
+    fn is_filling(&self) -> bool {
+        !self.ready_connections.is_empty()
+    }
+
+    fn is_full(&self) -> bool {
+        let per_shard_target = self.get_per_shard_target();
+        self.conns
+            .iter()
+            .all(|conns| conns.len() >= per_shard_target)
+    }
+
+    fn need_filling(&self) -> bool {
+        !self.is_filling() && !self.is_full()
+    }
+
+    fn get_per_shard_target(&self) -> usize {
         // We treat "no shards" as "one shard"
         let shard_count = self.conns.len();
 
@@ -431,214 +493,231 @@ impl PoolRefiller {
         // The goal is to distribute connections evenly across all shards.
         // The target connection count might not be divisible by the number
         // of shards, in such case we just round the number up.
-        let per_shard_target = (target_count + shard_count - 1) / shard_count;
+        (target_count + shard_count - 1) / shard_count
+    }
 
-        // Adjust the target count if it was not even
-        let target_count = per_shard_target * shard_count;
+    fn can_use_shard_aware_port(&self) -> bool {
+        self.sharder.is_some()
+            && self.shard_aware_port.is_some()
+            && self.pool_config.can_use_shard_aware_port
+    }
 
-        let mut opened_connection_futs = FuturesUnordered::new();
+    // Begins opening a number of connections in order to fill the connection pool.
+    // Futures which open the connections are pushed to the `ready_connections`
+    // FuturesUnordered structure, and their results are processed in the main loop.
+    fn start_filling(&mut self) {
+        let per_shard_target = self.get_per_shard_target();
 
-        match (self.sharder.as_ref(), self.shard_aware_port) {
-            (Some(sharder), Some(shard_aware_port))
-                if self.pool_config.can_use_shard_aware_port =>
-            {
-                // Try to fill up each shard up to `per_shard_target` connections
-                for (shard_id, shard_conns) in self.conns.iter().enumerate() {
-                    trace!(
-                        "[{}] Will open {} connections to shard {}",
-                        self.address,
-                        per_shard_target.saturating_sub(shard_conns.len()),
-                        shard_id,
-                    );
-                    let sinfo = ShardAwareConnectionInfo {
-                        shard: shard_id as Shard,
-                        sharder: sharder.clone(),
-                        port: shard_aware_port,
-                    };
-                    for _ in shard_conns.len()..per_shard_target {
-                        opened_connection_futs.push(open_connection(
-                            self.address,
-                            self.regular_port,
-                            self.pool_config.connection_config.clone(),
-                            self.current_keyspace.clone(),
-                            Some(sinfo.clone()),
-                        ));
-                    }
-                }
-            }
-            _ => {
-                // Calculate how many more connections we need to open in order
-                // to achieve the target connection count.
-                //
-                // When connecting to Scylla through non-shard-aware port,
-                // Scylla alone will choose shards for us. We hope that
-                // they will distribute across shards in the way we want,
-                // but we have no guarantee, so we might have to retry
-                // connecting later.
-                let total_opened_connections: usize = self.conns.iter().map(Vec::len).sum();
-
+        if self.can_use_shard_aware_port() {
+            // Try to fill up each shard up to `per_shard_target` connections
+            for (shard_id, shard_conns) in self.conns.iter().enumerate() {
                 trace!(
-                    "[{}] Will open {} non-shard-aware connections",
+                    "[{}] Will open {} connections to shard {}",
                     self.address,
-                    target_count.saturating_sub(total_opened_connections),
+                    per_shard_target.saturating_sub(shard_conns.len()),
+                    shard_id,
                 );
-
-                for _ in total_opened_connections..target_count {
-                    opened_connection_futs.push(open_connection(
-                        self.address,
-                        self.regular_port,
-                        self.pool_config.connection_config.clone(),
-                        self.current_keyspace.clone(),
-                        None,
-                    ));
+                for _ in shard_conns.len()..per_shard_target {
+                    self.start_opening_connection(Some(shard_id as Shard));
                 }
             }
-        }
+        } else {
+            // Calculate how many more connections we need to open in order
+            // to achieve the target connection count.
+            //
+            // When connecting to Scylla through non-shard-aware port,
+            // Scylla alone will choose shards for us. We hope that
+            // they will distribute across shards in the way we want,
+            // but we have no guarantee, so we might have to retry
+            // connecting later.
+            for shard_conns in self.conns.iter() {
+                for _ in shard_conns.len()..per_shard_target {
+                    self.start_opening_connection(None);
+                }
+            }
 
-        // Wait until all connections are ready
-        let mut had_error = false;
-        while let Some(evt) = opened_connection_futs.next().await {
-            match evt.result {
-                Err(err) => {
+            trace!(
+                "[{}] Will open {} non-shard-aware connections",
+                self.address,
+                self.ready_connections.len(),
+            );
+        }
+    }
+
+    // Handles a newly opened connection and decides what to do with it.
+    fn handle_ready_connection(&mut self, evt: OpenedConnectionEvent) {
+        let per_shard_target = self.get_per_shard_target();
+
+        match evt.result {
+            Err(err) => {
+                if evt.requested_shard.is_some() {
                     // If we failed to connect to a shard-aware port,
                     // fall back to the non-shard-aware port.
-                    // Don't set `had_error` here; the shard-aware port
-                    // might be unreachable, but the regular port might be
-                    // reachable. If we set `had_error` here, it would cause
-                    // the backoff to increase on each refill. With the
-                    // non-shard aware port, multiple refills are sometimes
+                    // Don't set `had_error_since_last_refill` here;
+                    // the shard-aware port might be unreachable, but
+                    // the regular port might be reachable. If we set
+                    // `had_error_since_last_refill` here, it would cause
+                    // the backoff to increase on each refill. With
+                    // the non-shard aware port, multiple refills are sometimes
                     // necessary, so increasing the backoff would delay
                     // filling the pool even if the non-shard-aware port works
                     // and does not cause any errors.
-                    if evt.requested_shard.is_some() {
-                        debug!(
-                            "[{}] Failed to open connection to the shard-aware port: {:?}, will retry with regular port",
-                            self.address,
-                            err,
+                    debug!(
+                        "[{}] Failed to open connection to the shard-aware port: {:?}, will retry with regular port",
+                        self.address,
+                        err,
+                    );
+                    self.start_opening_connection(None);
+                } else {
+                    // Encountered an error while connecting to the non-shard-aware
+                    // port. Set the `had_error_since_last_refill` flag so that
+                    // the next refill will be delayed more than this one.
+                    self.had_error_since_last_refill = true;
+                    debug!(
+                        "[{}] Failed to open connection to the non-shard-aware port: {:?}",
+                        self.address, err,
+                    );
+                }
+            }
+            Ok((connection, error_receiver)) => {
+                // Update sharding and optionally reshard
+                let shard_info = connection.get_shard_info().as_ref();
+                let sharder = shard_info.map(|s| s.get_sharder());
+                let shard_id = shard_info.map_or(0, |s| s.shard as usize);
+                self.maybe_reshard(sharder);
+
+                // Update the shard-aware port
+                if self.shard_aware_port != connection.get_shard_aware_port() {
+                    debug!(
+                        "[{}] Updating shard aware port: {:?}",
+                        self.address,
+                        connection.get_shard_aware_port(),
+                    );
+                    self.shard_aware_port = connection.get_shard_aware_port();
+                }
+
+                // Before the connection can be put to the pool, we need
+                // to make sure that it uses appropriate keyspace
+                if let Some(keyspace) = &self.current_keyspace {
+                    if evt.keyspace_name.as_ref() != Some(keyspace) {
+                        // Asynchronously start setting keyspace for this
+                        // connection. It will be received on the ready
+                        // connections channel and will travel through
+                        // this logic again, to be finally put into
+                        // the conns.
+                        self.start_setting_keyspace_for_connection(
+                            connection,
+                            error_receiver,
+                            evt.requested_shard,
                         );
-                        opened_connection_futs.push(open_connection(
-                            self.address,
-                            self.regular_port,
-                            self.pool_config.connection_config.clone(),
-                            self.current_keyspace.clone(),
-                            None,
-                        ));
-                    } else {
-                        // Encountered an error while connecting to the non-shard-aware
-                        // port. Set the `had_error` flag so that the next refill
-                        // will be delayed more than this one.
-                        had_error = true;
-                        debug!(
-                            "[{}] Failed to open connection to the non-shard-aware port: {:?}",
-                            self.address, err,
-                        );
+                        return;
                     }
                 }
-                Ok((connection, error_receiver)) => {
-                    // Update sharding and optionally reshard
-                    let sharder = connection
-                        .get_shard_info()
-                        .as_ref()
-                        .map(|s| s.get_sharder());
-                    self.maybe_reshard(sharder);
 
-                    // Update the shard-aware port
-                    if self.shard_aware_port != connection.get_shard_aware_port() {
-                        debug!(
-                            "[{}] Updating shard aware port: {:?}",
-                            self.address,
-                            connection.get_shard_aware_port(),
-                        );
-                        self.shard_aware_port = connection.get_shard_aware_port();
-                    }
-
-                    let shard_id = connection
-                        .get_shard_info()
-                        .as_ref()
-                        .map_or(0, |s| s.shard as usize);
+                if self.conns[shard_id].len() < per_shard_target {
+                    // Don't complain and just put the connection to the pool.
+                    // If this was a shard-aware port connection which missed
+                    // the right shard, we still want to accept it
+                    // because it fills our pool.
                     let conn = Arc::new(connection);
+                    trace!(
+                        "[{}] Adding connection {:p} to shard {} pool, now is {}/{}",
+                        self.address,
+                        Arc::as_ptr(&conn),
+                        shard_id,
+                        self.conns[shard_id].len() + 1,
+                        per_shard_target,
+                    );
 
-                    if self.conns[shard_id].len() < per_shard_target {
-                        // Don't complain and just put the connection to the pool.
-                        // If this was a shard-aware port connection which missed
-                        // the right shard, we still want to accept it
-                        // because it fills our pool.
-                        trace!(
-                            "[{}] Adding connection {:p} to shard {} pool, now is {}/{}",
-                            self.address,
-                            Arc::as_ptr(&conn),
-                            shard_id,
-                            self.conns[shard_id].len() + 1,
-                            per_shard_target,
-                        );
+                    self.connection_errors
+                        .push(wait_for_error(Arc::downgrade(&conn), error_receiver).boxed());
+                    self.conns[shard_id].push(conn);
 
-                        self.conns[shard_id].push(conn.clone());
-                        self.connection_errors
-                            .push(wait_for_error(Arc::downgrade(&conn), error_receiver).boxed());
-                    } else if evt.requested_shard.is_some() {
-                        // This indicates that some shard-aware connections
-                        // missed the target shard (probably due to NAT).
-                        // Because we don't know how address translation
-                        // works here, it's better to leave the task
-                        // of choosing the shard to Scylla. We will retry
-                        // immediately with a non-shard-aware port here.
+                    self.update_shared_conns();
+                } else if evt.requested_shard.is_some() {
+                    // This indicates that some shard-aware connections
+                    // missed the target shard (probably due to NAT).
+                    // Because we don't know how address translation
+                    // works here, it's better to leave the task
+                    // of choosing the shard to Scylla. We will retry
+                    // immediately with a non-shard-aware port here.
+                    debug!(
+                        "[{}] Excess shard-aware port connection for shard {}; will retry with non-shard-aware port",
+                        self.address,
+                        shard_id,
+                    );
+
+                    self.start_opening_connection(None);
+                } else {
+                    // We got unlucky and Scylla didn't distribute
+                    // shards across connections evenly.
+                    // We will retry in the next iteration,
+                    // for now put it into the excess connection
+                    // pool.
+                    let excess_connection_limit =
+                        EXCESS_CONNECTION_BOUND_PER_SHARD_MULTIPLIER * per_shard_target;
+                    if self.excess_connections.len() > excess_connection_limit {
+                        // Remove excess connections if they go over the limit
                         debug!(
-                            "[{}] Excess shard-aware port connection for shard {}; will retry with non-shard-aware port",
+                            "[{}] Excess connection pool reached limit of {} connections - clearing",
                             self.address,
-                            shard_id,
+                            excess_connection_limit,
                         );
-
-                        opened_connection_futs.push(open_connection(
-                            self.address,
-                            self.regular_port,
-                            self.pool_config.connection_config.clone(),
-                            self.current_keyspace.clone(),
-                            None,
-                        ));
-                    } else {
-                        // We got unlucky and Scylla didn't distribute
-                        // shards across connections evenly.
-                        // We will retry in the next iteration,
-                        // for now put it into the excess connection
-                        // pool.
-
-                        let excess_connection_limit =
-                            EXCESS_CONNECTION_BOUND_PER_SHARD_MULTIPLIER * target_count;
-                        if self.excess_connections.len() > excess_connection_limit {
-                            // Remove excess connections if they go over the limit
-                            debug!(
-                                "[{}] Excess connection pool reached limit of {} connections - clearing",
-                                self.address,
-                                excess_connection_limit,
-                            );
-                            self.excess_connections.clear();
-                        }
-
-                        trace!(
-                            "[{}] Storing excess connection {:p} for shard {}",
-                            self.address,
-                            Arc::as_ptr(&conn),
-                            shard_id,
-                        );
-
-                        self.excess_connections.push(conn.clone());
-                        self.connection_errors
-                            .push(wait_for_error(Arc::downgrade(&conn), error_receiver).boxed());
+                        self.excess_connections.clear();
                     }
+
+                    let conn = Arc::new(connection);
+                    trace!(
+                        "[{}] Storing excess connection {:p} for shard {}",
+                        self.address,
+                        Arc::as_ptr(&conn),
+                        shard_id,
+                    );
+
+                    self.connection_errors
+                        .push(wait_for_error(Arc::downgrade(&conn), error_receiver).boxed());
+                    self.excess_connections.push(conn);
                 }
             }
         }
+    }
 
-        // We update here instead of doing it immediately after every connect.
-        // The reasoning behind that is that lots of requests might be waiting
-        // for the pool to be updated, and if we updated it after the first
-        // connection, then we could overwhelm a single shard.
-        //
-        // By postponing the update, we trade off availability for robustness.
-        self.update_shared_conns();
-
-        let is_full = self.conns.iter().all(|v| v.len() == per_shard_target);
-        FillResult { is_full, had_error }
+    fn start_opening_connection(&self, shard: Option<Shard>) {
+        let cfg = self.pool_config.connection_config.clone();
+        let fut = match (self.sharder.clone(), self.shard_aware_port, shard) {
+            (Some(sharder), Some(port), Some(shard)) => {
+                let shard_aware_address = (self.address, port).into();
+                async move {
+                    let result = open_connection_to_shard_aware_port(
+                        shard_aware_address,
+                        shard,
+                        sharder.clone(),
+                        &cfg,
+                    )
+                    .await;
+                    OpenedConnectionEvent {
+                        result,
+                        requested_shard: Some(shard),
+                        keyspace_name: None,
+                    }
+                }
+                .boxed()
+            }
+            _ => {
+                let non_shard_aware_address = (self.address, self.regular_port).into();
+                async move {
+                    let result =
+                        connection::open_connection(non_shard_aware_address, None, cfg).await;
+                    OpenedConnectionEvent {
+                        result,
+                        requested_shard: None,
+                        keyspace_name: None,
+                    }
+                }
+                .boxed()
+            }
+        };
+        self.ready_connections.push(fut);
     }
 
     fn maybe_reshard(&mut self, new_sharder: Option<Sharder>) {
@@ -739,53 +818,89 @@ impl PoolRefiller {
         );
     }
 
-    async fn use_keyspace(
+    fn use_keyspace(
         &mut self,
         keyspace_name: &VerifiedKeyspaceName,
-    ) -> Result<(), QueryError> {
+    ) -> impl Future<Output = Result<(), QueryError>> + Send + Sync + 'static {
         self.current_keyspace = Some(keyspace_name.clone());
 
-        if !self.has_connections() {
-            return Ok(());
-        }
+        let mut conns = self.conns.clone();
+        let keyspace_name = keyspace_name.clone();
 
-        let mut use_keyspace_futures = Vec::new();
-
-        for shard_conns in self.conns.iter_mut() {
-            for conn in shard_conns.iter_mut() {
-                let fut = conn.use_keyspace(keyspace_name);
-                use_keyspace_futures.push(fut);
+        async move {
+            if conns.is_empty() {
+                return Ok(());
             }
-        }
 
-        let use_keyspace_results: Vec<Result<(), QueryError>> =
-            futures::future::join_all(use_keyspace_futures).await;
+            let mut use_keyspace_futures = Vec::new();
 
-        // If there was at least one Ok and the rest were IoErrors we can return Ok
-        // keyspace name is correct and will be used on broken connection on the next reconnect
-
-        // If there were only IoErrors then return IoError
-        // If there was an error different than IoError return this error - something is wrong
-
-        let mut was_ok: bool = false;
-        let mut io_error: Option<Arc<std::io::Error>> = None;
-
-        for result in use_keyspace_results {
-            match result {
-                Ok(()) => was_ok = true,
-                Err(err) => match err {
-                    QueryError::IoError(io_err) => io_error = Some(io_err),
-                    _ => return Err(err),
-                },
+            for shard_conns in conns.iter_mut() {
+                for conn in shard_conns.iter_mut() {
+                    let fut = conn.use_keyspace(&keyspace_name);
+                    use_keyspace_futures.push(fut);
+                }
             }
-        }
 
-        if was_ok {
-            return Ok(());
-        }
+            let use_keyspace_results: Vec<Result<(), QueryError>> =
+                futures::future::join_all(use_keyspace_futures).await;
 
-        // We can unwrap io_error because use_keyspace_futures must be nonempty
-        Err(QueryError::IoError(io_error.unwrap()))
+            // If there was at least one Ok and the rest were IoErrors we can return Ok
+            // keyspace name is correct and will be used on broken connection on the next reconnect
+
+            // If there were only IoErrors then return IoError
+            // If there was an error different than IoError return this error - something is wrong
+
+            let mut was_ok: bool = false;
+            let mut io_error: Option<Arc<std::io::Error>> = None;
+
+            for result in use_keyspace_results {
+                match result {
+                    Ok(()) => was_ok = true,
+                    Err(err) => match err {
+                        QueryError::IoError(io_err) => io_error = Some(io_err),
+                        _ => return Err(err),
+                    },
+                }
+            }
+
+            if was_ok {
+                return Ok(());
+            }
+
+            // We can unwrap io_error because use_keyspace_futures must be nonempty
+            Err(QueryError::IoError(io_error.unwrap()))
+        }
+    }
+
+    // Requires the keyspace to be set
+    // Requires that the event is for a successful connection
+    fn start_setting_keyspace_for_connection(
+        &mut self,
+        connection: Connection,
+        error_receiver: ErrorReceiver,
+        requested_shard: Option<Shard>,
+    ) {
+        // TODO: There should be a timeout for this
+
+        let keyspace_name = self.current_keyspace.as_ref().cloned().unwrap();
+        self.ready_connections.push(
+            async move {
+                let result = connection.use_keyspace(&keyspace_name).await;
+                if let Err(err) = result {
+                    warn!(
+                        "[{}] Failed to set keyspace for new connection: {}",
+                        connection.get_connect_address().ip(),
+                        err,
+                    );
+                }
+                OpenedConnectionEvent {
+                    result: Ok((connection, error_receiver)),
+                    requested_shard,
+                    keyspace_name: Some(keyspace_name),
+                }
+            }
+            .boxed(),
+        );
     }
 
     fn has_connections(&self) -> bool {
@@ -813,65 +928,10 @@ async fn wait_for_error(
     }
 }
 
-#[derive(Clone)]
-struct ShardAwareConnectionInfo {
-    shard: Shard,
-    sharder: Sharder,
-    port: u16,
-}
-
 struct OpenedConnectionEvent {
     result: Result<(Connection, ErrorReceiver), QueryError>,
     requested_shard: Option<Shard>,
-}
-
-// The reason we use the same function for both shard-aware port and
-// non-shard-aware port connections is that we want to have the same future
-// type returned in both cases. This allows us to put them together
-// FuturesUnordered structure.
-async fn open_connection(
-    address: IpAddr,
-    regular_port: u16,
-    connection_config: ConnectionConfig,
     keyspace_name: Option<VerifiedKeyspaceName>,
-    shard_aware_info: Option<ShardAwareConnectionInfo>,
-) -> OpenedConnectionEvent {
-    let evt = if let Some(info) = shard_aware_info {
-        let shard_aware_address = (address, info.port).into();
-        let result = open_connection_to_shard_aware_port(
-            shard_aware_address,
-            info.shard,
-            info.sharder,
-            &connection_config,
-        )
-        .await;
-
-        OpenedConnectionEvent {
-            result,
-            requested_shard: Some(info.shard),
-        }
-    } else {
-        let non_shard_aware_address = (address, regular_port).into();
-        let result =
-            connection::open_connection(non_shard_aware_address, None, connection_config).await;
-
-        OpenedConnectionEvent {
-            result,
-            requested_shard: None,
-        }
-    };
-
-    // Use keyspace
-    if let (Ok((connection, _)), Some(keyspace_name)) = (&evt.result, keyspace_name) {
-        if let Err(err) = connection.use_keyspace(&keyspace_name).await {
-            warn!(
-                "[{}] Failed set keyspace for new connection: {:?}",
-                address, err
-            );
-        };
-    }
-
-    evt
 }
 
 async fn open_connection_to_shard_aware_port(
