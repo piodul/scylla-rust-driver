@@ -416,27 +416,15 @@ impl PoolRefiller {
                 }
 
                 req = use_keyspace_request_receiver.recv() => {
-                    match req {
-                        None => {
-                            // The keyspace request channel is dropped.
-                            // This means that the corresponding pool is dropped.
-                            // We can stop here.
-                            trace!("[{}] Keyspace request channel dropped, stopping asynchronous pool worker", self.address);
-                            return;
-                        }
-                        Some(req) => {
-                            debug!("[{}] Requested keyspace change: {}", self.address, req.keyspace_name.as_str());
-                            let fut = self.use_keyspace(&req.keyspace_name);
-                            let address = self.address;
-                            tokio::task::spawn(async move {
-                                let res = fut.await;
-                                match &res {
-                                    Ok(()) => debug!("[{}] Successfully changed current keyspace", address),
-                                    Err(err) => warn!("[{}] Failed to change keyspace: {:?}", address, err),
-                                }
-                                let _ = req.response_sender.send(res);
-                            });
-                        }
+                    if let Some(req) = req {
+                        debug!("[{}] Requested keyspace change: {}", self.address, req.keyspace_name.as_str());
+                        self.use_keyspace(&req.keyspace_name, req.response_sender);
+                    } else {
+                        // The keyspace request channel is dropped.
+                        // This means that the corresponding pool is dropped.
+                        // We can stop here.
+                        trace!("[{}] Keyspace request channel dropped, stopping asynchronous pool worker", self.address);
+                        return;
                     }
                 }
             }
@@ -811,13 +799,15 @@ impl PoolRefiller {
     fn use_keyspace(
         &mut self,
         keyspace_name: &VerifiedKeyspaceName,
-    ) -> impl Future<Output = Result<(), QueryError>> + Send + Sync + 'static {
+        response_sender: tokio::sync::oneshot::Sender<Result<(), QueryError>>,
+    ) {
         self.current_keyspace = Some(keyspace_name.clone());
 
         let mut conns = self.conns.clone();
         let keyspace_name = keyspace_name.clone();
+        let address = self.address;
 
-        async move {
+        let fut = async move {
             if conns.is_empty() {
                 return Ok(());
             }
@@ -859,7 +849,16 @@ impl PoolRefiller {
 
             // We can unwrap io_error because use_keyspace_futures must be nonempty
             Err(QueryError::IoError(io_error.unwrap()))
-        }
+        };
+
+        tokio::task::spawn(async move {
+            let res = fut.await;
+            match &res {
+                Ok(()) => debug!("[{}] Successfully changed current keyspace", address),
+                Err(err) => warn!("[{}] Failed to change keyspace: {:?}", address, err),
+            }
+            let _ = response_sender.send(res);
+        });
     }
 
     // Requires the keyspace to be set
