@@ -23,10 +23,9 @@ use tracing::{debug, trace, warn};
 pub enum PoolSize {
     /// Indicates that the pool should establish given number of connections to the node.
     ///
-    /// In case of Scylla nodes, this number will be rounded up to a multiplicity of the shard count
-    /// and then divided across shards. For example, with 4 shards and `PerHost(5)` pool size, the
-    /// pool size will be rounded up to 8 and divided across shards, so there will be 2 connections
-    /// per shard.
+    /// If this option is used with a Scylla cluster, it is not guaranteed that connections will be
+    /// distributed evenly across shards. Use this option if you cannot use the shard-aware port
+    /// and you suffer from the "connection storm" problems.
     PerHost(NonZeroUsize),
 
     /// Indicates that the pool should establish given number of connections to each shard on the node.
@@ -412,12 +411,7 @@ impl PoolRefiller {
                 evt = self.connection_errors.select_next_some(), if !self.connection_errors.is_empty() => {
                     if let Some(conn) = evt.connection.upgrade() {
                         debug!("[{}] Got error for connection {:p}: {:?}", self.address, Arc::as_ptr(&conn), evt.error);
-
-                        // Remove the connection from our local pool
                         self.remove_connection(conn);
-
-                        // Update the shared pool immediately
-                        self.update_shared_conns();
                     }
                 }
 
@@ -470,30 +464,16 @@ impl PoolRefiller {
     }
 
     fn is_full(&self) -> bool {
-        let per_shard_target = self.get_per_shard_target();
-        self.conns
-            .iter()
-            .all(|conns| conns.len() >= per_shard_target)
+        match self.pool_config.pool_size {
+            PoolSize::PerHost(target) => self.active_connection_count() >= target.get(),
+            PoolSize::PerShard(target) => {
+                self.conns.iter().all(|conns| conns.len() >= target.get())
+            }
+        }
     }
 
     fn need_filling(&self) -> bool {
         !self.is_filling() && !self.is_full()
-    }
-
-    fn get_per_shard_target(&self) -> usize {
-        // We treat "no shards" as "one shard"
-        let shard_count = self.conns.len();
-
-        // Calculate the desired connection count
-        let target_count = match self.pool_config.pool_size {
-            PoolSize::PerHost(target) => target.get(),
-            PoolSize::PerShard(target) => target.get() * shard_count,
-        };
-
-        // The goal is to distribute connections evenly across all shards.
-        // The target connection count might not be divisible by the number
-        // of shards, in such case we just round the number up.
-        (target_count + shard_count - 1) / shard_count
     }
 
     fn can_use_shard_aware_port(&self) -> bool {
@@ -506,48 +486,53 @@ impl PoolRefiller {
     // Futures which open the connections are pushed to the `ready_connections`
     // FuturesUnordered structure, and their results are processed in the main loop.
     fn start_filling(&mut self) {
-        let per_shard_target = self.get_per_shard_target();
-
         if self.can_use_shard_aware_port() {
-            // Try to fill up each shard up to `per_shard_target` connections
-            for (shard_id, shard_conns) in self.conns.iter().enumerate() {
-                trace!(
-                    "[{}] Will open {} connections to shard {}",
-                    self.address,
-                    per_shard_target.saturating_sub(shard_conns.len()),
-                    shard_id,
-                );
-                for _ in shard_conns.len()..per_shard_target {
-                    self.start_opening_connection(Some(shard_id as Shard));
+            // Only use the shard-aware port if we have a PerShard strategy
+            if let PoolSize::PerShard(target) = self.pool_config.pool_size {
+                // Try to fill up each shard up to `target` connections
+                for (shard_id, shard_conns) in self.conns.iter().enumerate() {
+                    trace!(
+                        "[{}] Will open {} connections to shard {}",
+                        self.address,
+                        target.get().saturating_sub(shard_conns.len()),
+                        shard_id,
+                    );
+                    for _ in shard_conns.len()..target.get() {
+                        self.start_opening_connection(Some(shard_id as Shard));
+                    }
                 }
+                return;
             }
-        } else {
-            // Calculate how many more connections we need to open in order
-            // to achieve the target connection count.
-            //
-            // When connecting to Scylla through non-shard-aware port,
-            // Scylla alone will choose shards for us. We hope that
-            // they will distribute across shards in the way we want,
-            // but we have no guarantee, so we might have to retry
-            // connecting later.
-            for shard_conns in self.conns.iter() {
-                for _ in shard_conns.len()..per_shard_target {
-                    self.start_opening_connection(None);
-                }
+        }
+        // Calculate how many more connections we need to open in order
+        // to achieve the target connection count.
+        let to_open_count = match self.pool_config.pool_size {
+            PoolSize::PerHost(target) => {
+                target.get().saturating_sub(self.active_connection_count())
             }
-
-            trace!(
-                "[{}] Will open {} non-shard-aware connections",
-                self.address,
-                self.ready_connections.len(),
-            );
+            PoolSize::PerShard(target) => self
+                .conns
+                .iter()
+                .map(|conns| target.get().saturating_sub(conns.len()))
+                .sum::<usize>(),
+        };
+        // When connecting to Scylla through non-shard-aware port,
+        // Scylla alone will choose shards for us. We hope that
+        // they will distribute across shards in the way we want,
+        // but we have no guarantee, so we might have to retry
+        // connecting later.
+        trace!(
+            "[{}] Will open {} non-shard-aware connections",
+            self.address,
+            to_open_count,
+        );
+        for _ in 0..to_open_count {
+            self.start_opening_connection(None);
         }
     }
 
     // Handles a newly opened connection and decides what to do with it.
     fn handle_ready_connection(&mut self, evt: OpenedConnectionEvent) {
-        let per_shard_target = self.get_per_shard_target();
-
         match evt.result {
             Err(err) => {
                 if evt.requested_shard.is_some() {
@@ -614,19 +599,25 @@ impl PoolRefiller {
                     }
                 }
 
-                if self.conns[shard_id].len() < per_shard_target {
+                // Decide if the connection can be accepted, according to
+                // the pool filling strategy
+                let can_be_accepted = match self.pool_config.pool_size {
+                    PoolSize::PerHost(target) => self.active_connection_count() < target.get(),
+                    PoolSize::PerShard(target) => self.conns[shard_id].len() < target.get(),
+                };
+
+                if can_be_accepted {
                     // Don't complain and just put the connection to the pool.
                     // If this was a shard-aware port connection which missed
                     // the right shard, we still want to accept it
                     // because it fills our pool.
                     let conn = Arc::new(connection);
                     trace!(
-                        "[{}] Adding connection {:p} to shard {} pool, now is {}/{}",
+                        "[{}] Adding connection {:p} to shard {} pool, now is {}",
                         self.address,
                         Arc::as_ptr(&conn),
                         shard_id,
                         self.conns[shard_id].len() + 1,
-                        per_shard_target,
                     );
 
                     self.connection_errors
@@ -654,18 +645,6 @@ impl PoolRefiller {
                     // We will retry in the next iteration,
                     // for now put it into the excess connection
                     // pool.
-                    let excess_connection_limit =
-                        EXCESS_CONNECTION_BOUND_PER_SHARD_MULTIPLIER * per_shard_target;
-                    if self.excess_connections.len() > excess_connection_limit {
-                        // Remove excess connections if they go over the limit
-                        debug!(
-                            "[{}] Excess connection pool reached limit of {} connections - clearing",
-                            self.address,
-                            excess_connection_limit,
-                        );
-                        self.excess_connections.clear();
-                    }
-
                     let conn = Arc::new(connection);
                     trace!(
                         "[{}] Storing excess connection {:p} for shard {}",
@@ -677,6 +656,16 @@ impl PoolRefiller {
                     self.connection_errors
                         .push(wait_for_error(Arc::downgrade(&conn), error_receiver).boxed());
                     self.excess_connections.push(conn);
+
+                    let excess_connection_limit = self.excess_connection_limit();
+                    if self.excess_connections.len() > excess_connection_limit {
+                        debug!(
+                            "[{}] Excess connection pool exceeded limit of {} connections - clearing",
+                            self.address,
+                            excess_connection_limit,
+                        );
+                        self.excess_connections.clear();
+                    }
                 }
             }
         }
@@ -798,6 +787,7 @@ impl PoolRefiller {
                 ptr,
                 shard_id
             );
+            self.update_shared_conns();
             return;
         }
 
@@ -905,6 +895,21 @@ impl PoolRefiller {
 
     fn has_connections(&self) -> bool {
         self.conns.iter().any(|v| !v.is_empty())
+    }
+
+    fn active_connection_count(&self) -> usize {
+        self.conns.iter().map(Vec::len).sum::<usize>()
+    }
+
+    fn excess_connection_limit(&self) -> usize {
+        match self.pool_config.pool_size {
+            PoolSize::PerShard(target) => {
+                EXCESS_CONNECTION_BOUND_PER_SHARD_MULTIPLIER * target.get()
+            }
+
+            // In PerHost mode we do not need to keep excess connections
+            PoolSize::PerHost(_) => 0,
+        }
     }
 }
 

@@ -5,7 +5,6 @@ use bytes::Bytes;
 use futures::future::join_all;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::lookup_host;
@@ -139,7 +138,7 @@ impl SessionConfig {
             auth_username: None,
             auth_password: None,
             connect_timeout: std::time::Duration::from_secs(5),
-            connection_pool_size: PoolSize::PerShard(NonZeroUsize::new(1).unwrap()),
+            connection_pool_size: Default::default(),
             disallow_shard_aware_port: false,
         }
     }
