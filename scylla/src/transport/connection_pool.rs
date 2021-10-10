@@ -659,6 +659,10 @@ impl PoolRefiller {
         }
     }
 
+    // Starts opening a new connection in the background. The result of connecting
+    // will be available on `ready_connections`. If the shard is specified and
+    // the shard aware port is available, it will attempt to connect directly
+    // to the shard using the port.
     fn start_opening_connection(&self, shard: Option<Shard>) {
         let cfg = self.pool_config.connection_config.clone();
         let fut = match (self.sharder.clone(), self.shard_aware_port, shard) {
@@ -720,6 +724,7 @@ impl PoolRefiller {
         self.excess_connections.clear();
     }
 
+    // Updates `shared_conns` based on `conns`.
     fn update_shared_conns(&mut self) {
         let new_conns = if !self.has_connections() {
             Arc::new(MaybePoolConnections::Pending)
@@ -744,6 +749,8 @@ impl PoolRefiller {
         self.pool_updated_notify.notify_waiters();
     }
 
+    // Removes given connection from the pool. It looks both into active
+    // connections and excess connections.
     fn remove_connection(&mut self, connection: Arc<Connection>) {
         let ptr = Arc::as_ptr(&connection);
 
@@ -796,6 +803,11 @@ impl PoolRefiller {
         );
     }
 
+    // Sets current keyspace for available connections.
+    // Connections which are being currently opened and future connections
+    // will have this keyspace set when they appear on `ready_connections`.
+    // Sends response to the `response_sender` when all current connections
+    // have their keyspace set.
     fn use_keyspace(
         &mut self,
         keyspace_name: &VerifiedKeyspaceName,
