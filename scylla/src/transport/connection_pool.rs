@@ -197,6 +197,9 @@ impl NodeConnectionPool {
         response_receiver.await.unwrap() // NodePoolRefiller always responds
     }
 
+    // Waits until the pool becomes initialized.
+    // The pool is considered initialized either if the first connection has been
+    // established or after first filling ends, whichever comes first.
     pub async fn wait_until_initialized(&self) {
         // First, register for the notification
         // so that we don't miss it
@@ -430,6 +433,9 @@ impl PoolRefiller {
 
             // Schedule refilling here
             if !refill_scheduled && self.need_filling() {
+                // Update shared_conns here even if there are no connections.
+                // This will signal the waiters in `wait_until_initialized`.
+                self.update_shared_conns();
                 if self.had_error_since_last_refill {
                     self.refill_delay_strategy.on_fill_error();
                 } else {
@@ -824,10 +830,6 @@ impl PoolRefiller {
         let address = self.address;
 
         let fut = async move {
-            if conns.is_empty() {
-                return Ok(());
-            }
-
             let mut use_keyspace_futures = Vec::new();
 
             for shard_conns in conns.iter_mut() {
@@ -835,6 +837,10 @@ impl PoolRefiller {
                     let fut = conn.use_keyspace(&keyspace_name);
                     use_keyspace_futures.push(fut);
                 }
+            }
+
+            if use_keyspace_futures.is_empty() {
+                return Ok(());
             }
 
             let use_keyspace_results: Vec<Result<(), QueryError>> =
