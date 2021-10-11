@@ -263,7 +263,7 @@ impl RefillDelayStrategy {
         self.current_delay
     }
 
-    fn on_pool_full(&mut self) {
+    fn on_successful_fill(&mut self) {
         self.current_delay = MIN_FILL_BACKOFF;
     }
 
@@ -398,7 +398,6 @@ impl PoolRefiller {
                     self.handle_ready_connection(evt);
 
                     if self.is_full() {
-                        self.refill_delay_strategy.on_pool_full();
                         debug!(
                             "[{}] Pool is full, clearing {} excess connections",
                             self.address,
@@ -433,6 +432,8 @@ impl PoolRefiller {
             if !refill_scheduled && self.need_filling() {
                 if self.had_error_since_last_refill {
                     self.refill_delay_strategy.on_fill_error();
+                } else {
+                    self.refill_delay_strategy.on_successful_fill();
                 }
                 let delay = self.refill_delay_strategy.get_delay();
                 debug!(
@@ -601,11 +602,12 @@ impl PoolRefiller {
                     // because it fills our pool.
                     let conn = Arc::new(connection);
                     trace!(
-                        "[{}] Adding connection {:p} to shard {} pool, now is {}",
+                        "[{}] Adding connection {:p} to shard {} pool, now there are {} for the shard, total {}",
                         self.address,
                         Arc::as_ptr(&conn),
                         shard_id,
                         self.conns[shard_id].len() + 1,
+                        self.active_connection_count() + 1,
                     );
 
                     self.connection_errors
@@ -777,10 +779,12 @@ impl PoolRefiller {
             .map_or(0, |s| s.shard as usize);
         if shard_id < self.conns.len() && maybe_remove_in_vec(&mut self.conns[shard_id]) {
             trace!(
-                "[{}] Connection {:p} removed from shard {} pool",
+                "[{}] Connection {:p} removed from shard {} pool, now there is {} for the shard, total {}",
                 self.address,
                 ptr,
-                shard_id
+                shard_id,
+                self.conns[shard_id].len(),
+                self.active_connection_count(),
             );
             self.update_shared_conns();
             return;
