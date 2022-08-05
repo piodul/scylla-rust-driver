@@ -830,9 +830,8 @@ pub(crate) fn deser_cql_value(
     })
 }
 
-// fn deser_raw_rows(buf: &mut &[u8]) -> StdResult<>
-
-fn deser_rows(buf: &mut &[u8]) -> StdResult<Rows, ParseError> {
+fn deser_raw_rows(byts: Bytes) -> StdResult<super::raw_result::RawRows, ParseError> {
+    let buf = &mut &*byts;
     let metadata = deser_result_metadata(buf)?;
 
     // TODO: the protocol allows an optimization (which must be explicitly requested on query by
@@ -843,24 +842,15 @@ fn deser_rows(buf: &mut &[u8]) -> StdResult<Rows, ParseError> {
 
     let rows_count: usize = types::read_int(buf)?.try_into()?;
 
-    let mut rows = Vec::with_capacity(rows_count);
-    for _ in 0..rows_count {
-        let mut columns = Vec::with_capacity(metadata.col_count);
-        for i in 0..metadata.col_count {
-            let v = if let Some(mut b) = types::read_bytes_opt(buf)? {
-                Some(deser_cql_value(&metadata.col_specs[i].typ, &mut b)?)
-            } else {
-                None
-            };
-            columns.push(v);
-        }
-        rows.push(Row { columns });
-    }
-    Ok(Rows {
+    Ok(super::raw_result::RawRows {
         metadata,
         rows_count,
-        rows,
+        raw_rows: byts.slice_ref(*buf),
     })
+}
+
+fn deser_rows(byts: Bytes) -> StdResult<Rows, ParseError> {
+    deser_raw_rows(byts)?.into_rows()
 }
 
 fn deser_set_keyspace(buf: &mut &[u8]) -> StdResult<SetKeyspace, ParseError> {
@@ -894,7 +884,7 @@ pub fn deserialize(byts: Bytes) -> StdResult<Result, ParseError> {
     let buf = &mut &*byts;
     Ok(match types::read_int(buf)? {
         0x0001 => Void,
-        0x0002 => Rows(deser_rows(buf)?),
+        0x0002 => Rows(deser_rows(byts)?),
         0x0003 => SetKeyspace(deser_set_keyspace(buf)?),
         0x0004 => Prepared(deser_prepared(buf)?),
         0x0005 => SchemaChange(deser_schema_change(buf)?),
