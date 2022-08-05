@@ -889,8 +889,9 @@ fn deser_schema_change(buf: &mut &[u8]) -> StdResult<SchemaChange, ParseError> {
     })
 }
 
-pub fn deserialize(buf: &mut &[u8]) -> StdResult<Result, ParseError> {
+pub fn deserialize(byts: Bytes) -> StdResult<Result, ParseError> {
     use self::Result::*;
+    let buf = &mut &*byts;
     Ok(match types::read_int(buf)? {
         0x0001 => Void,
         0x0002 => Rows(deser_rows(buf)?),

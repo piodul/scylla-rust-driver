@@ -48,7 +48,7 @@ impl Response {
                 Response::Authenticate(authenticate::Authenticate::deserialize(buf)?)
             }
             ResponseOpcode::Supported => Response::Supported(Supported::deserialize(buf)?),
-            ResponseOpcode::Result => Response::Result(result::deserialize(buf)?),
+            ResponseOpcode::Result => Response::Result(result::deserialize(byts)?),
             ResponseOpcode::Event => Response::Event(event::Event::deserialize(buf)?),
             ResponseOpcode::AuthChallenge => {
                 Response::AuthChallenge(authenticate::AuthChallenge::deserialize(buf)?)
