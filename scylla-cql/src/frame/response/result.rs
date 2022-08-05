@@ -370,11 +370,6 @@ impl Row {
     }
 }
 
-pub struct RawRows {
-    pub metadata: ResultMetadata,
-    pub raw_rows: Bytes,
-}
-
 #[derive(Debug)]
 pub struct Rows {
     pub metadata: ResultMetadata,
