@@ -2,6 +2,7 @@ pub mod authenticate;
 pub mod cql_to_rust;
 pub mod error;
 pub mod event;
+pub mod raw_result;
 pub mod result;
 pub mod supported;
 

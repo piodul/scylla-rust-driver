@@ -370,6 +370,11 @@ impl Row {
     }
 }
 
+pub struct RawRows {
+    pub metadata: ResultMetadata,
+    pub raw_rows: Bytes,
+}
+
 #[derive(Debug)]
 pub struct Rows {
     pub metadata: ResultMetadata,
@@ -556,7 +561,10 @@ fn deser_prepared_metadata(buf: &mut &[u8]) -> StdResult<PreparedMetadata, Parse
     })
 }
 
-fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue, ParseError> {
+pub(crate) fn deser_cql_value(
+    typ: &ColumnType,
+    buf: &mut &[u8],
+) -> StdResult<CqlValue, ParseError> {
     use ColumnType::*;
 
     if buf.is_empty() {
@@ -826,6 +834,8 @@ fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue, Par
         }
     })
 }
+
+// fn deser_raw_rows(buf: &mut &[u8]) -> StdResult<>
 
 fn deser_rows(buf: &mut &[u8]) -> StdResult<Rows, ParseError> {
     let metadata = deser_result_metadata(buf)?;
