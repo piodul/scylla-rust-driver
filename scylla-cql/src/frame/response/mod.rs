@@ -7,6 +7,7 @@ pub mod result;
 pub mod supported;
 
 use crate::frame::frame_errors::ParseError;
+use bytes::Bytes;
 use num_enum::TryFromPrimitive;
 
 pub use error::Error;
@@ -38,7 +39,8 @@ pub enum Response {
 }
 
 impl Response {
-    pub fn deserialize(opcode: ResponseOpcode, buf: &mut &[u8]) -> Result<Response, ParseError> {
+    pub fn deserialize(opcode: ResponseOpcode, byts: Bytes) -> Result<Response, ParseError> {
+        let buf = &mut &*byts;
         let response = match opcode {
             ResponseOpcode::Error => Response::Error(Error::deserialize(buf)?),
             ResponseOpcode::Ready => Response::Ready,

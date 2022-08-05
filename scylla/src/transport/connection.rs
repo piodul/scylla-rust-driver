@@ -736,7 +736,7 @@ impl Connection {
             warn!(warning = warn_description.as_str());
         }
 
-        let response = Response::deserialize(task_response.opcode, &mut &*body_with_ext.body)?;
+        let response = Response::deserialize(task_response.opcode, body_with_ext.body)?;
 
         Ok(QueryResponse {
             response,
