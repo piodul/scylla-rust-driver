@@ -845,7 +845,7 @@ fn deser_raw_rows(byts: Bytes) -> StdResult<super::raw_result::RawRows, ParseErr
     Ok(super::raw_result::RawRows {
         metadata,
         rows_count,
-        raw_rows: byts.slice_ref(*buf),
+        rows: byts.slice_ref(*buf),
     })
 }
 
@@ -884,7 +884,7 @@ pub fn deserialize(byts: Bytes) -> StdResult<Result, ParseError> {
     let buf = &mut &*byts;
     Ok(match types::read_int(buf)? {
         0x0001 => Void,
-        0x0002 => Rows(deser_rows(byts)?),
+        0x0002 => Rows(deser_rows(byts.slice_ref(buf))?),
         0x0003 => SetKeyspace(deser_set_keyspace(buf)?),
         0x0004 => Prepared(deser_prepared(buf)?),
         0x0005 => SchemaChange(deser_schema_change(buf)?),
