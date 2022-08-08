@@ -1,4 +1,5 @@
 use crate::frame::response::cql_to_rust::{FromRow, FromRowError};
+use crate::frame::response::result;
 use crate::frame::response::result::ColumnSpec;
 use crate::frame::response::result::Row;
 use crate::transport::session::{IntoTypedRows, TypedRowIter};
@@ -13,7 +14,7 @@ pub struct QueryResult {
     /// Rows returned by the database.\
     /// Queries like `SELECT` will have `Some(Vec)`, while queries like `INSERT` will have `None`.\
     /// Can contain an empty Vec.
-    pub rows: Option<Vec<Row>>,
+    pub rows: Option<result::Rows>,
     /// Warnings returned by the database
     pub warnings: Vec<String>,
     /// CQL Tracing uuid - can only be Some if tracing is enabled for this query
@@ -29,7 +30,7 @@ impl QueryResult {
     /// Fails when the query isn't of a type that could return rows, same as [`rows()`](QueryResult::rows).
     pub fn rows_num(&self) -> Result<usize, RowsExpectedError> {
         match &self.rows {
-            Some(rows) => Ok(rows.len()),
+            Some(rows) => Ok(rows.rows_count),
             None => Err(RowsExpectedError),
         }
     }
@@ -39,7 +40,7 @@ impl QueryResult {
     /// Can return an empty `Vec`.
     pub fn rows(self) -> Result<Vec<Row>, RowsExpectedError> {
         match self.rows {
-            Some(rows) => Ok(rows),
+            Some(rows) => Ok(rows.as_cql_rows().unwrap()), // TODO: Do not unwrap
             None => Err(RowsExpectedError),
         }
     }
@@ -64,7 +65,7 @@ impl QueryResult {
     /// Returns rows when `QueryResult.rows` is `Some`, otherwise an empty Vec.\
     /// Equal to `rows().unwrap_or_default()`.
     pub fn rows_or_empty(self) -> Vec<Row> {
-        self.rows.unwrap_or_default()
+        self.rows.unwrap_or_default().as_cql_rows().unwrap()
     }
 
     /// Returns rows parsed as the given type.\
@@ -138,7 +139,13 @@ impl QueryResult {
     pub(crate) fn merge_with_next_page_res(&mut self, other: QueryResult) {
         if let Some(other_rows) = other.rows {
             match &mut self.rows {
-                Some(self_rows) => self_rows.extend(other_rows),
+                Some(self_rows) => {
+                    let mut bm = bytes::BytesMut::new();
+                    bm.extend(self_rows.rows);
+                    bm.extend(other_rows.rows);
+                    self_rows.rows = bm.as_bytes();
+                    self_rows.rows_count += other_rows.rows_count;
+                }
                 None => self.rows = Some(other_rows),
             }
         };
@@ -275,32 +282,59 @@ impl From<SingleRowError> for SingleRowTypedError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::response::result::{ColumnSpec, ColumnType, CqlValue, Row, TableSpec};
-    use std::convert::TryInto;
+    use crate::frame::response::result::{ColumnSpec, ColumnType, TableSpec};
+    use crate::frame::value::Value;
+
+    fn make_column_spec(typ: result::ColumnType) -> result::ColumnSpec {
+        result::ColumnSpec {
+            table_spec: result::TableSpec {
+                ks_name: "ks".to_string(),
+                table_name: "tbl".to_string(),
+            },
+            name: "column".to_string(),
+            typ,
+        }
+    }
 
     // Returns specified number of rows, each one containing one int32 value.
     // Values are 0, 1, 2, 3, 4, ...
-    fn make_rows(rows_num: usize) -> Vec<Row> {
-        let mut rows: Vec<Row> = Vec::with_capacity(rows_num);
+    fn make_rows(rows_num: usize) -> result::Rows {
+        let mut serialized_contents = Vec::new();
         for cur_value in 0..rows_num {
-            let int_val: i32 = cur_value.try_into().unwrap();
-            rows.push(Row {
-                columns: vec![Some(CqlValue::Int(int_val))],
-            });
+            (cur_value as i32)
+                .serialize(&mut serialized_contents)
+                .unwrap();
         }
-        rows
+        result::Rows {
+            metadata: result::ResultMetadata {
+                col_count: 1,
+                paging_state: None,
+                col_specs: vec![make_column_spec(result::ColumnType::Int)],
+            },
+            rows_count: rows_num,
+            rows: Bytes::copy_from_slice(&serialized_contents),
+        }
     }
 
     // Just like make_rows, but each column has one String value
     // values are "val0", "val1", "val2", ...
-    fn make_string_rows(rows_num: usize) -> Vec<Row> {
-        let mut rows: Vec<Row> = Vec::with_capacity(rows_num);
+    fn make_string_rows(rows_num: usize) -> result::Rows {
+        let mut serialized_contents = Vec::new();
         for cur_value in 0..rows_num {
-            rows.push(Row {
-                columns: vec![Some(CqlValue::Text(format!("val{}", cur_value)))],
-            });
+            format!("val{}", cur_value)
+                .as_str()
+                .serialize(&mut serialized_contents)
+                .unwrap();
         }
-        rows
+        result::Rows {
+            metadata: result::ResultMetadata {
+                col_count: 1,
+                paging_state: None,
+                col_specs: vec![make_column_spec(result::ColumnType::Text)],
+            },
+            rows_count: rows_num,
+            rows: Bytes::copy_from_slice(&serialized_contents),
+        }
     }
 
     fn make_not_rows_query_result() -> QueryResult {
@@ -453,15 +487,15 @@ mod tests {
         );
         assert_eq!(
             make_rows_query_result(1).first_row(),
-            Ok(make_rows(1).into_iter().next().unwrap())
+            Ok(make_rows(1).as_cql_rows().into_iter().next().unwrap())
         );
         assert_eq!(
             make_rows_query_result(2).first_row(),
-            Ok(make_rows(2).into_iter().next().unwrap())
+            Ok(make_rows(2).as_cql_rows().into_iter().next().unwrap())
         );
         assert_eq!(
             make_rows_query_result(3).first_row(),
-            Ok(make_rows(3).into_iter().next().unwrap())
+            Ok(make_rows(3).as_cql_rows().into_iter().next().unwrap())
         );
     }
 
@@ -503,15 +537,15 @@ mod tests {
         assert_eq!(make_rows_query_result(0).maybe_first_row(), Ok(None));
         assert_eq!(
             make_rows_query_result(1).maybe_first_row(),
-            Ok(Some(make_rows(1).into_iter().next().unwrap()))
+            Ok(Some(make_rows(1).as_cql_rows().into_iter().next().unwrap()))
         );
         assert_eq!(
             make_rows_query_result(2).maybe_first_row(),
-            Ok(Some(make_rows(2).into_iter().next().unwrap()))
+            Ok(Some(make_rows(2).as_cql_rows().into_iter().next().unwrap()))
         );
         assert_eq!(
             make_rows_query_result(3).maybe_first_row(),
-            Ok(Some(make_rows(3).into_iter().next().unwrap()))
+            Ok(Some(make_rows(3).as_cql_rows().into_iter().next().unwrap()))
         );
     }
 

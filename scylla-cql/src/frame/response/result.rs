@@ -17,6 +17,8 @@ use std::{
 };
 use uuid::Uuid;
 
+use super::raw_result::{DeserializableFromRow, RowIterator, TypedRowIterator};
+
 #[derive(Debug)]
 pub struct SetKeyspace {
     pub keyspace_name: String,
@@ -336,7 +338,7 @@ pub struct ColumnSpec {
 
 #[derive(Debug, Default)]
 pub struct ResultMetadata {
-    col_count: usize,
+    pub(crate) col_count: usize,
     pub paging_state: Option<Bytes>,
     pub col_specs: Vec<ColumnSpec>,
 }
@@ -374,7 +376,40 @@ impl Row {
 pub struct Rows {
     pub metadata: ResultMetadata,
     pub rows_count: usize,
-    pub rows: Vec<Row>,
+    pub rows: Bytes,
+}
+
+impl Rows {
+    pub fn as_cql_rows(self) -> StdResult<Vec<Row>, ParseError> {
+        type CellType = Option<CqlValue>;
+        type RowType = Vec<CellType>;
+
+        self.iter()
+            .map(|row| {
+                Ok(Row {
+                    columns: RowType::deserialize(row?)?,
+                })
+            })
+            .collect::<StdResult<Vec<_>, ParseError>>()
+    }
+
+    pub fn as_typed<'me, RowT: DeserializableFromRow<'me>>(
+        &'me self,
+    ) -> StdResult<TypedRowIterator<'me, RowT>, ParseError> {
+        RowT::type_check(&self.metadata.col_specs)?;
+        Ok(TypedRowIterator {
+            row_iterator: self.iter(),
+            phantom_data: Default::default(),
+        })
+    }
+
+    pub fn iter(&self) -> RowIterator {
+        RowIterator {
+            mem: &*self.rows,
+            col_specs: &self.metadata.col_specs,
+            remaining_rows: self.rows_count,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -830,7 +865,7 @@ pub(crate) fn deser_cql_value(
     })
 }
 
-fn deser_raw_rows(byts: Bytes) -> StdResult<super::raw_result::RawRows, ParseError> {
+fn deser_rows(byts: Bytes) -> StdResult<Rows, ParseError> {
     let buf = &mut &*byts;
     let metadata = deser_result_metadata(buf)?;
 
@@ -842,15 +877,11 @@ fn deser_raw_rows(byts: Bytes) -> StdResult<super::raw_result::RawRows, ParseErr
 
     let rows_count: usize = types::read_int(buf)?.try_into()?;
 
-    Ok(super::raw_result::RawRows {
+    Ok(Rows {
         metadata,
         rows_count,
         rows: byts.slice_ref(*buf),
     })
-}
-
-fn deser_rows(byts: Bytes) -> StdResult<Rows, ParseError> {
-    deser_raw_rows(byts)?.into_rows()
 }
 
 fn deser_set_keyspace(buf: &mut &[u8]) -> StdResult<SetKeyspace, ParseError> {

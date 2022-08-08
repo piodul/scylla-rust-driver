@@ -658,7 +658,7 @@ impl Connection {
             .await?
             .rows
             .ok_or(QueryError::ProtocolError("Version query returned not rows"))?
-            .into_typed::<(Uuid,)>()
+            .as_typed::<(Uuid,)>()
             .next()
             .ok_or(QueryError::ProtocolError("Admin table returned empty rows"))?
             .map_err(|_| QueryError::ProtocolError("Row is not uuid type as it should be"))?;

@@ -1,64 +1,17 @@
-use super::result::{self, ColumnSpec, ColumnType, CqlValue, ResultMetadata};
+use super::result::{self, ColumnSpec, ColumnType, CqlValue};
 use crate::frame::{frame_errors::ParseError, types};
-use bytes::Bytes;
-
-pub struct RawRows {
-    pub metadata: ResultMetadata,
-    pub rows_count: usize,
-    pub rows: Bytes,
-}
 
 pub struct RawValue<'rows> {
     pub typ: &'rows ColumnType,
     pub value: Option<&'rows [u8]>,
 }
 
-impl RawRows {
-    pub fn into_rows(self) -> Result<result::Rows, ParseError> {
-        type CellType = Option<CqlValue>;
-        type RowType = Vec<CellType>;
-
-        let rows = self
-            .iter()
-            .map(|row| {
-                Ok(result::Row {
-                    columns: RowType::deserialize(row?)?,
-                })
-            })
-            .collect::<Result<Vec<_>, ParseError>>()?;
-
-        Ok(result::Rows {
-            metadata: self.metadata,
-            rows_count: self.rows_count,
-            rows,
-        })
-    }
-
-    pub fn as_typed<'me, RowT: DeserializableFromRow<'me>>(
-        &'me self,
-    ) -> Result<TypedRowIterator<'me, RowT>, ParseError> {
-        RowT::type_check(&self.metadata.col_specs)?;
-        Ok(TypedRowIterator {
-            row_iterator: self.iter(),
-            phantom_data: Default::default(),
-        })
-    }
-
-    pub fn iter(&self) -> RowIterator {
-        RowIterator {
-            mem: &*self.rows.0,
-            col_specs: &self.metadata.col_specs,
-            remaining_rows: self.rows_count,
-        }
-    }
-}
-
 /// Iterator _over_ rows.
 #[derive(Clone)]
 pub struct RowIterator<'rows> {
-    mem: &'rows [u8],
-    col_specs: &'rows [ColumnSpec],
-    remaining_rows: usize,
+    pub(crate) mem: &'rows [u8],
+    pub(crate) col_specs: &'rows [ColumnSpec],
+    pub(crate) remaining_rows: usize,
 }
 
 impl<'rows> Iterator for RowIterator<'rows> {
@@ -94,8 +47,8 @@ impl<'rows> Iterator for RowIterator<'rows> {
 
 #[derive(Clone)]
 pub struct TypedRowIterator<'rows, RowT> {
-    row_iterator: RowIterator<'rows>,
-    phantom_data: std::marker::PhantomData<RowT>,
+    pub(crate) row_iterator: RowIterator<'rows>,
+    pub(crate) phantom_data: std::marker::PhantomData<RowT>,
 }
 
 impl<'rows, RowT> Iterator for TypedRowIterator<'rows, RowT>
@@ -234,34 +187,167 @@ where
     }
 }
 
-// impl<'rows> DeserializableFromValue<'rows> for i8 {
-//     type Target = i8;
+macro_rules! impl_strict_type {
+    ($cql_name:literal, $t:ty, $col_type:pat, $conv:expr) => {
+        impl<'rows> DeserializableFromValue<'rows> for $t {
+            type Target = $t;
 
-//     fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
-//         if !matches!(typ, ColumnType::TinyInt) {
-//             return Err(ParseError("expected tinyint".to_string()));
-//         }
-//         Ok(())
-//     }
+            fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
+                if !matches!(typ, $col_type) {
+                    return Err(ParseError::BadData(format!(
+                        "Expected {}, got {:?}",
+                        $cql_name, typ
+                    )));
+                }
+                Ok(())
+            }
 
-//     fn deserialize(_v: RawValue<'rows>) -> Result<Self::Target, ParseError> {
-//         let v = ensure_not_null(v)?;
-//         ensure_exact_length(v, 1)?;
-//         Ok(v[0] as i8)
-//     }
-// }
+            fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {
+                let value = ensure_not_null(v.value)?;
+                $conv(value)
+            }
+        }
+    };
+}
+
+macro_rules! impl_fixed_numeric_type {
+    ($cql_name:literal, $t:ty, $col_type:pat) => {
+        impl_strict_type!($cql_name, $t, $col_type, |value| {
+            const SIZE: usize = std::mem::size_of::<$t>();
+            let arr = ensure_exact_length::<SIZE>($cql_name, value)?;
+            Ok(<$t>::from_be_bytes(arr))
+        });
+    };
+}
+
+impl_strict_type!("boolean", bool, ColumnType::Boolean, |value| {
+    let arr = ensure_exact_length::<1>("boolean", value)?;
+    Ok(arr[0] != 0x00)
+});
+
+impl_fixed_numeric_type!("tinyint", i8, ColumnType::TinyInt);
+impl_fixed_numeric_type!("smallint", i16, ColumnType::SmallInt);
+impl_fixed_numeric_type!("int", i32, ColumnType::Int);
+impl_fixed_numeric_type!("bigint", i64, ColumnType::BigInt); // TODO: Consider accepting counters here
+impl_fixed_numeric_type!("float", f32, ColumnType::Float);
+impl_fixed_numeric_type!("double", f64, ColumnType::Double);
+
+impl_strict_type!("blob", &'rows [u8], ColumnType::Blob, Ok);
+impl_strict_type!("blob", Vec<u8>, ColumnType::Blob, |value: &'rows [u8]| Ok(
+    value.to_vec()
+));
+
+// &str or String may be created either from `text` or `ascii`,
+// hence we cannot use impl_strict_type! for their impls.
+
+// TODO: `Ascii` and `Utf8` strict types
+
+impl<'rows> DeserializableFromValue<'rows> for &'rows str {
+    type Target = &'rows str;
+
+    fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
+        ensure_string_type(typ)
+    }
+
+    fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {
+        parse_string(v)
+    }
+}
+
+impl<'rows> DeserializableFromValue<'rows> for String {
+    type Target = String;
+
+    fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
+        ensure_string_type(typ)
+    }
+
+    fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {
+        parse_string(v).map(str::to_string)
+    }
+}
+
+fn ensure_string_type(typ: &ColumnType) -> Result<(), ParseError> {
+    match typ {
+        ColumnType::Ascii | ColumnType::Text => Ok(()),
+        _ => Err(ParseError::BadData(format!(
+            "Expected ascii or text, got {:?}",
+            typ
+        ))),
+    }
+}
+
+fn parse_string(v: RawValue) -> Result<&str, ParseError> {
+    let value = ensure_not_null(v.value)?;
+    if matches!(v.typ, ColumnType::Ascii) && !value.is_ascii() {
+        return Err(ParseError::BadData(
+            "Expected a valid ASCII string".to_string(),
+        ));
+    }
+    Ok(std::str::from_utf8(value)?)
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Date {
+    days_since_epoch: i32,
+}
+
+impl Date {
+    pub fn from_days_since_unix_epoch(days_since_epoch: i32) -> Self {
+        Self { days_since_epoch }
+    }
+
+    pub fn from_naive_date(date: chrono::NaiveDate) -> Option<Self> {
+        let days_since_epoch: i32 = date
+            .signed_duration_since(chrono::NaiveDate::from_ymd(1970, 1, 1))
+            .num_days()
+            .try_into()
+            .ok()?;
+        Some(Self::from_days_since_unix_epoch(days_since_epoch))
+    }
+
+    pub fn to_days_since_unix_epoch(&self) -> i32 {
+        self.days_since_epoch
+    }
+
+    // TODO: Consider a From/Into conversion
+    pub fn to_naive_date(&self) -> Option<chrono::NaiveDate> {
+        let days_since_epoch = chrono::Duration::days(self.days_since_epoch as i64);
+        chrono::NaiveDate::from_ymd(1970, 1, 1).checked_add_signed(days_since_epoch)
+    }
+}
+
+impl_strict_type!("date", Date, ColumnType::Date, |value| {
+    let arr = ensure_exact_length::<4>("date", value)?;
+    Ok(Date::from_days_since_unix_epoch(i32::from_be_bytes(arr)))
+});
+
+// TODO: Consider a "Decimal" structure
+
+impl_strict_type!(
+    "decimal",
+    bigdecimal::BigDecimal,
+    ColumnType::Decimal,
+    |mut value| {
+        let scale = types::read_int(&mut value)? as i64;
+        let int_value = num_bigint::BigInt::from_signed_bytes_be(value);
+        Ok(bigdecimal::BigDecimal::from((int_value, scale)))
+    }
+);
 
 fn ensure_not_null(v: Option<&[u8]>) -> Result<&[u8], ParseError> {
     v.ok_or_else(|| ParseError::BadData("expected a non-null value".to_string()))
 }
 
-// fn ensure_exact_length(v: &[u8], length: usize) -> Result<(), ParseError> {
-//     if v.len() != length {
-//         return Err(ParseError::BadData(format!(
-//             "expected a value of {} bytes, got {}",
-//             length,
-//             v.len()
-//         )));
-//     }
-//     Ok(())
-// }
+fn ensure_exact_length<const SIZE: usize>(
+    cql_name: &str,
+    v: &[u8],
+) -> Result<[u8; SIZE], ParseError> {
+    v.try_into().map_err(|_| {
+        return ParseError::BadData(format!(
+            "The type {} requires {} bytes, but got {}",
+            cql_name,
+            SIZE,
+            v.len(),
+        ));
+    })
+}
