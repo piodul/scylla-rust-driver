@@ -1,5 +1,11 @@
+use std::net::IpAddr;
+
 use super::result::{self, ColumnSpec, ColumnType, CqlValue};
-use crate::frame::{frame_errors::ParseError, types};
+use crate::frame::{
+    frame_errors::ParseError,
+    types,
+    value::{CqlDuration, Date, Time, Timestamp},
+};
 
 pub struct RawValue<'rows> {
     pub typ: &'rows ColumnType,
@@ -233,7 +239,7 @@ impl_fixed_numeric_type!("float", f32, ColumnType::Float);
 impl_fixed_numeric_type!("double", f64, ColumnType::Double);
 
 impl_strict_type!("blob", &'rows [u8], ColumnType::Blob, Ok);
-impl_strict_type!("blob", Vec<u8>, ColumnType::Blob, |value: &'rows [u8]| Ok(
+impl_strict_type!("blob", Vec<u8>, ColumnType::Blob, |value: &'_ [u8]| Ok(
     value.to_vec()
 ));
 
@@ -286,39 +292,10 @@ fn parse_string(v: RawValue) -> Result<&str, ParseError> {
     Ok(std::str::from_utf8(value)?)
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Date {
-    days_since_epoch: i32,
-}
-
-impl Date {
-    pub fn from_days_since_unix_epoch(days_since_epoch: i32) -> Self {
-        Self { days_since_epoch }
-    }
-
-    pub fn from_naive_date(date: chrono::NaiveDate) -> Option<Self> {
-        let days_since_epoch: i32 = date
-            .signed_duration_since(chrono::NaiveDate::from_ymd(1970, 1, 1))
-            .num_days()
-            .try_into()
-            .ok()?;
-        Some(Self::from_days_since_unix_epoch(days_since_epoch))
-    }
-
-    pub fn to_days_since_unix_epoch(&self) -> i32 {
-        self.days_since_epoch
-    }
-
-    // TODO: Consider a From/Into conversion
-    pub fn to_naive_date(&self) -> Option<chrono::NaiveDate> {
-        let days_since_epoch = chrono::Duration::days(self.days_since_epoch as i64);
-        chrono::NaiveDate::from_ymd(1970, 1, 1).checked_add_signed(days_since_epoch)
-    }
-}
-
 impl_strict_type!("date", Date, ColumnType::Date, |value| {
     let arr = ensure_exact_length::<4>("date", value)?;
-    Ok(Date::from_days_since_unix_epoch(i32::from_be_bytes(arr)))
+    let days = (i32::from_be_bytes(arr) as u32).wrapping_add(1 << 31);
+    Ok(Date(days))
 });
 
 // TODO: Consider a "Decimal" structure
@@ -334,6 +311,138 @@ impl_strict_type!(
     }
 );
 
+impl_strict_type!(
+    "duration",
+    CqlDuration,
+    ColumnType::Duration,
+    |mut value| {
+        let months = i32::try_from(types::vint_decode(&mut value)?)?;
+        let days = i32::try_from(types::vint_decode(&mut value)?)?;
+        let nanoseconds = types::vint_decode(&mut value)?;
+
+        // TODO: Verify that there are no bytes remaining
+
+        Ok(CqlDuration {
+            months,
+            days,
+            nanoseconds,
+        })
+    }
+);
+
+impl_strict_type!("timestamp", Timestamp, ColumnType::Timestamp, |value| {
+    let arr = ensure_exact_length::<8>("date", value)?;
+    let duration = chrono::Duration::milliseconds(i64::from_be_bytes(arr));
+    Ok(Timestamp(duration))
+});
+
+impl_strict_type!("time", Time, ColumnType::Time, |value| {
+    let arr = ensure_exact_length::<8>("date", value)?;
+    let nanoseconds = i64::from_be_bytes(arr);
+
+    // Valid values are in the range 0 to 86399999999999
+    if !(0..=86399999999999).contains(&nanoseconds) {
+        return Err(ParseError::BadData(format! {
+            "Invalid time value only 0 to 86399999999999 allowed: {}.", nanoseconds,
+        }));
+    }
+
+    Ok(Time(chrono::Duration::nanoseconds(nanoseconds)))
+});
+
+impl_strict_type!("inet", IpAddr, ColumnType::Inet, |value: &'_ [u8]| {
+    if let Ok(ipv4) = <[u8; 4]>::try_from(value) {
+        Ok(IpAddr::from(ipv4))
+    } else if let Ok(ipv16) = <[u8; 16]>::try_from(value) {
+        Ok(IpAddr::from(ipv16))
+    } else {
+        Err(ParseError::BadData(format!(
+            "Invalid inet bytes length: {}",
+            value.len()
+        )))
+    }
+});
+
+// Here, uuid works both with timeuuid and uuid
+// TODO: Consider adding separate types
+
+impl<'rows> DeserializableFromValue<'rows> for uuid::Uuid {
+    type Target = uuid::Uuid;
+
+    fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
+        match typ {
+            ColumnType::Timeuuid | ColumnType::Uuid => Ok(()),
+            _ => Err(ParseError::BadData(format!(
+                "Expected timeuuid or uuid, got {:?}",
+                typ,
+            ))),
+        }
+    }
+
+    fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {
+        let value = ensure_not_null(v.value)?;
+        let arr = ensure_exact_length::<16>("timeuuid/uuid", value)?;
+        let i = u128::from_be_bytes(arr);
+        Ok(uuid::Uuid::from_u128(i))
+    }
+}
+
+// Compound types follow
+
+// Set and List
+pub struct SequenceIterator<'rows, T> {
+    mem: &'rows [u8],
+    phantom_data: std::marker::PhantomData<T>,
+}
+
+impl<'rows, T> DeserializableFromValue<'rows> for SequenceIterator<'rows, T>
+where
+    T: DeserializableFromValue<'rows>,
+{
+    type Target = SequenceIterator<'rows>;
+
+    fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
+        ensure_sequence_type::<T>(typ)
+    }
+
+    fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {}
+}
+
+// impl<'rows, T> DeserializableFromValue<'rows> for Vec<T>
+// where
+//     T: DeserializableFromValue<'rows>,
+// {
+//     type Target = Vec<T>;
+
+//     fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
+//         match typ {
+//             ColumnType::List(el) | ColumnType::Set(el) => T::type_check(el),
+//             _ => Err(ParseError::BadData(format!(
+//                 "Expected set or list, got {:?}",
+//                 typ
+//             ))),
+//         }
+//     }
+
+//     fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {
+
+//     }
+// }
+
+fn ensure_sequence_type<'rows, T>(typ: &ColumnType) -> Result<(), ParseError>
+where
+    T: DeserializableFromValue<'rows>,
+{
+    // TODO: Add more information to context in case the type check fails
+    match typ {
+        ColumnType::List(el) | ColumnType::Set(el) => T::type_check(el),
+        _ => Err(ParseError::BadData(format!(
+            "Expected set or list, got {:?}",
+            typ
+        ))),
+    }
+}
+
 fn ensure_not_null(v: Option<&[u8]>) -> Result<&[u8], ParseError> {
     v.ok_or_else(|| ParseError::BadData("expected a non-null value".to_string()))
 }
@@ -343,11 +452,11 @@ fn ensure_exact_length<const SIZE: usize>(
     v: &[u8],
 ) -> Result<[u8; SIZE], ParseError> {
     v.try_into().map_err(|_| {
-        return ParseError::BadData(format!(
+        ParseError::BadData(format!(
             "The type {} requires {} bytes, but got {}",
             cql_name,
             SIZE,
             v.len(),
-        ));
+        ))
     })
 }
