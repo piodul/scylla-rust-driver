@@ -393,16 +393,16 @@ async fn query_peers(conn: &Connection, connect_port: u16) -> Result<Vec<Peer>, 
         "system.local query response was not Rows",
     ))?;
 
-    let mut result: Vec<Peer> = Vec::with_capacity(peers_rows.len() + 1);
+    let mut result: Vec<Peer> = Vec::with_capacity(peers_rows.rows_count + 1);
 
     let typed_peers_rows =
-        peers_rows.into_typed::<(IpAddr, Option<String>, Option<String>, Option<Vec<String>>)>();
+        peers_rows.as_typed::<(IpAddr, Option<String>, Option<String>, Option<Vec<String>>)>()?;
 
     // For the local node we should use connection's address instead of rpc_address unless SNI is enabled (TODO)
     // Replace address in local_rows with connection's address
     let local_address: IpAddr = conn.get_connect_address().ip();
     let typed_local_rows = local_rows
-        .into_typed::<(IpAddr, Option<String>, Option<String>, Option<Vec<String>>)>()
+        .as_typed::<(IpAddr, Option<String>, Option<String>, Option<Vec<String>>)>()?
         .map(|res| res.map(|(_addr, dc, rack, tokens)| (local_address, dc, rack, tokens)));
 
     for row in typed_peers_rows.chain(typed_local_rows) {
@@ -459,7 +459,7 @@ async fn query_keyspaces(
                 "system_schema.keyspaces query response was not Rows",
             ))?;
 
-    let mut result = HashMap::with_capacity(rows.len());
+    let mut result = HashMap::with_capacity(rows.rows_count);
     let (mut all_tables, mut all_user_defined_types) = if fetch_schema {
         (
             query_tables(conn).await?,
@@ -469,7 +469,7 @@ async fn query_keyspaces(
         (HashMap::new(), HashMap::new())
     };
 
-    for row in rows.into_typed::<(String, HashMap<String, String>)>() {
+    for row in rows.as_typed::<(String, HashMap<String, String>)>()? {
         let (keyspace_name, strategy_map) = row.map_err(|_| {
             QueryError::ProtocolError("system_schema.keyspaces has invalid column type")
         })?;
@@ -511,7 +511,7 @@ async fn query_user_defined_types(
 
     let mut result = HashMap::with_capacity(rows.len());
 
-    for row in rows.into_typed::<(String, String, Vec<String>, Vec<String>)>() {
+    for row in rows.as_typed::<(String, String, Vec<String>, Vec<String>)>()? {
         let (keyspace_name, type_name, field_names, field_types) = row.map_err(|_| {
             QueryError::ProtocolError("system_schema.types has invalid column type")
         })?;
@@ -548,7 +548,7 @@ async fn query_tables(
     let mut result = HashMap::with_capacity(rows.len());
     let mut tables = query_tables_schema(conn).await?;
 
-    for row in rows.into_typed::<(String, String)>() {
+    for row in rows.as_typed::<(String, String)>()? {
         let (keyspace_name, table_name) = row.map_err(|_| {
             QueryError::ProtocolError("system_schema.tables has invalid column type")
         })?;
@@ -594,7 +594,7 @@ async fn query_tables_schema(
 
     let mut tables_schema = HashMap::with_capacity(rows.len());
 
-    for row in rows.into_typed::<(String, String, String, String, i32, String)>() {
+    for row in rows.as_typed::<(String, String, String, String, i32, String)>()? {
         let (keyspace_name, table_name, column_name, kind, position, type_) =
             row.map_err(|_| {
                 QueryError::ProtocolError("system_schema.columns has invalid column type")
@@ -806,7 +806,7 @@ async fn query_table_partitioners(
 
     let mut result = HashMap::with_capacity(rows.len());
 
-    for row in rows.into_typed::<(String, String, Option<String>)>() {
+    for row in rows.as_typed::<(String, String, Option<String>)>()? {
         let (keyspace_name, table_name, partitioner) = row.map_err(|_| {
             QueryError::ProtocolError("system_schema.tables has invalid column type")
         })?;

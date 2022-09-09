@@ -57,6 +57,7 @@ const DEFAULT_ITER_PAGE_SIZE: i32 = 5000;
 pub struct RowIterator {
     current_row_idx: usize,
     current_page: Rows,
+    deserialized_rows: Vec<Row>,
     page_receiver: mpsc::Receiver<Result<ReceivedPage, QueryError>>,
     tracing_ids: Vec<Uuid>,
 }
@@ -102,8 +103,8 @@ impl Stream for RowIterator {
         }
 
         let idx = s.current_row_idx;
-        if idx < s.current_page.rows.len() {
-            let row = mem::take(&mut s.current_page.rows[idx]);
+        if idx < s.deserialized_rows.len() {
+            let row = mem::take(&mut s.deserialized_rows[idx]);
             s.current_row_idx += 1;
             return Poll::Ready(Some(Ok(row)));
         }
@@ -168,10 +169,12 @@ impl RowIterator {
         tokio::task::spawn(worker_task);
 
         let pages_received = receiver.recv().await.unwrap()?;
+        let deserialized_rows = pages_received.rows.as_cql_rows()?;
 
         Ok(RowIterator {
             current_row_idx: 0,
             current_page: pages_received.rows,
+            deserialized_rows,
             page_receiver: receiver,
             tracing_ids: if let Some(tracing_id) = pages_received.tracing_id {
                 vec![tracing_id]
@@ -235,10 +238,12 @@ impl RowIterator {
         tokio::task::spawn(worker_task);
 
         let pages_received = receiver.recv().await.unwrap()?;
+        let deserialized_rows = pages_received.rows.as_cql_rows()?;
 
         Ok(RowIterator {
             current_row_idx: 0,
             current_page: pages_received.rows,
+            deserialized_rows,
             page_receiver: receiver,
             tracing_ids: if let Some(tracing_id) = pages_received.tracing_id {
                 vec![tracing_id]

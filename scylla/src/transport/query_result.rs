@@ -19,10 +19,6 @@ pub struct QueryResult {
     pub warnings: Vec<String>,
     /// CQL Tracing uuid - can only be Some if tracing is enabled for this query
     pub tracing_id: Option<Uuid>,
-    /// Paging state returned from the server
-    pub paging_state: Option<Bytes>,
-    /// Column specification returned from the server
-    pub col_specs: Vec<ColumnSpec>,
 }
 
 impl QueryResult {
@@ -35,77 +31,77 @@ impl QueryResult {
         }
     }
 
-    /// Returns the received rows when present.\
-    /// If `QueryResult.rows` is `None`, which means that this query is not supposed to return rows (e.g `INSERT`), returns an error.\
-    /// Can return an empty `Vec`.
-    pub fn rows(self) -> Result<Vec<Row>, RowsExpectedError> {
-        match self.rows {
-            Some(rows) => Ok(rows.as_cql_rows().unwrap()), // TODO: Do not unwrap
-            None => Err(RowsExpectedError),
-        }
-    }
+    // /// Returns the received rows when present.\
+    // /// If `QueryResult.rows` is `None`, which means that this query is not supposed to return rows (e.g `INSERT`), returns an error.\
+    // /// Can return an empty `Vec`.
+    // pub fn rows(self) -> Result<Vec<Row>, RowsExpectedError> {
+    //     match self.rows {
+    //         Some(rows) => Ok(rows.as_cql_rows().unwrap()), // TODO: Do not unwrap
+    //         None => Err(RowsExpectedError),
+    //     }
+    // }
 
-    /// Returns the received rows parsed as the given type.\
-    /// Equal to `rows()?.into_typed()`.\
-    /// Fails when the query isn't of a type that could return rows, same as [`rows()`](QueryResult::rows).
-    pub fn rows_typed<RowT: FromRow>(self) -> Result<TypedRowIter<RowT>, RowsExpectedError> {
-        Ok(self.rows()?.into_typed())
-    }
+    // /// Returns the received rows parsed as the given type.\
+    // /// Equal to `rows()?.into_typed()`.\
+    // /// Fails when the query isn't of a type that could return rows, same as [`rows()`](QueryResult::rows).
+    // pub fn rows_typed<RowT: FromRow>(self) -> Result<TypedRowIter<RowT>, RowsExpectedError> {
+    //     Ok(self.rows()?.into_typed())
+    // }
 
-    /// Returns `Ok` for a result of a query that shouldn't contain any rows.\
-    /// Will return `Ok` for `INSERT` result, but a `SELECT` result, even an empty one, will cause an error.\
-    /// Opposite of [`rows()`](QueryResult::rows).
-    pub fn result_not_rows(&self) -> Result<(), RowsNotExpectedError> {
-        match self.rows {
-            Some(_) => Err(RowsNotExpectedError),
-            None => Ok(()),
-        }
-    }
+    // /// Returns `Ok` for a result of a query that shouldn't contain any rows.\
+    // /// Will return `Ok` for `INSERT` result, but a `SELECT` result, even an empty one, will cause an error.\
+    // /// Opposite of [`rows()`](QueryResult::rows).
+    // pub fn result_not_rows(&self) -> Result<(), RowsNotExpectedError> {
+    //     match self.rows {
+    //         Some(_) => Err(RowsNotExpectedError),
+    //         None => Ok(()),
+    //     }
+    // }
 
-    /// Returns rows when `QueryResult.rows` is `Some`, otherwise an empty Vec.\
-    /// Equal to `rows().unwrap_or_default()`.
-    pub fn rows_or_empty(self) -> Vec<Row> {
-        self.rows.unwrap_or_default().as_cql_rows().unwrap()
-    }
+    // /// Returns rows when `QueryResult.rows` is `Some`, otherwise an empty Vec.\
+    // /// Equal to `rows().unwrap_or_default()`.
+    // pub fn rows_or_empty(self) -> Vec<Row> {
+    //     self.rows.map(|r| r.as_cql_rows()).unwrap_or_default()
+    // }
 
-    /// Returns rows parsed as the given type.\
-    /// When `QueryResult.rows` is `None`, returns 0 rows.\
-    /// Equal to `rows_or_empty().into_typed::<RowT>()`.
-    pub fn rows_typed_or_empty<RowT: FromRow>(self) -> TypedRowIter<RowT> {
-        self.rows_or_empty().into_typed::<RowT>()
-    }
+    // /// Returns rows parsed as the given type.\
+    // /// When `QueryResult.rows` is `None`, returns 0 rows.\
+    // /// Equal to `rows_or_empty().into_typed::<RowT>()`.
+    // pub fn rows_typed_or_empty<RowT: FromRow>(self) -> TypedRowIter<RowT> {
+    //     self.rows_or_empty().into_typed::<RowT>()
+    // }
 
-    /// Returns first row from the received rows.\
-    /// When the first row is not available, returns an error.
-    pub fn first_row(self) -> Result<Row, FirstRowError> {
-        match self.maybe_first_row()? {
-            Some(row) => Ok(row),
-            None => Err(FirstRowError::RowsEmpty),
-        }
-    }
+    // /// Returns first row from the received rows.\
+    // /// When the first row is not available, returns an error.
+    // pub fn first_row(self) -> Result<Row, FirstRowError> {
+    //     match self.maybe_first_row()? {
+    //         Some(row) => Ok(row),
+    //         None => Err(FirstRowError::RowsEmpty),
+    //     }
+    // }
 
-    /// Returns first row from the received rows parsed as the given type.\
-    /// When the first row is not available, returns an error.
-    pub fn first_row_typed<RowT: FromRow>(self) -> Result<RowT, FirstRowTypedError> {
-        Ok(self.first_row()?.into_typed()?)
-    }
+    // /// Returns first row from the received rows parsed as the given type.\
+    // /// When the first row is not available, returns an error.
+    // pub fn first_row_typed<RowT: FromRow>(self) -> Result<RowT, FirstRowTypedError> {
+    //     Ok(self.first_row()?.into_typed()?)
+    // }
 
-    /// Returns `Option<RowT>` containing the first of a result.\
-    /// Fails when the query isn't of a type that could return rows, same as [`rows()`](QueryResult::rows).
-    pub fn maybe_first_row(self) -> Result<Option<Row>, RowsExpectedError> {
-        Ok(self.rows()?.into_iter().next())
-    }
+    // /// Returns `Option<RowT>` containing the first of a result.\
+    // /// Fails when the query isn't of a type that could return rows, same as [`rows()`](QueryResult::rows).
+    // pub fn maybe_first_row(self) -> Result<Option<Row>, RowsExpectedError> {
+    //     Ok(self.rows()?.into_iter().next())
+    // }
 
-    /// Returns `Option<RowT>` containing the first of a result.\
-    /// Fails when the query isn't of a type that could return rows, same as [`rows()`](QueryResult::rows).
-    pub fn maybe_first_row_typed<RowT: FromRow>(
-        self,
-    ) -> Result<Option<RowT>, MaybeFirstRowTypedError> {
-        match self.maybe_first_row()? {
-            Some(row) => Ok(Some(row.into_typed::<RowT>()?)),
-            None => Ok(None),
-        }
-    }
+    // /// Returns `Option<RowT>` containing the first of a result.\
+    // /// Fails when the query isn't of a type that could return rows, same as [`rows()`](QueryResult::rows).
+    // pub fn maybe_first_row_typed<RowT: FromRow>(
+    //     self,
+    // ) -> Result<Option<RowT>, MaybeFirstRowTypedError> {
+    //     match self.maybe_first_row()? {
+    //         Some(row) => Ok(Some(row.into_typed::<RowT>()?)),
+    //         None => Ok(None),
+    //     }
+    // }
 
     /// Returns the only received row.\
     /// Fails if the result is anything else than a single row.\
@@ -127,7 +123,7 @@ impl QueryResult {
 
     /// Returns a column specification for a column with given name, or None if not found
     pub fn get_column_spec<'a>(&'a self, name: &str) -> Option<(usize, &'a ColumnSpec)> {
-        self.col_specs
+        self.get_col_specs()
             .iter()
             .enumerate()
             .find(|(_id, spec)| spec.name == name)
@@ -154,6 +150,14 @@ impl QueryResult {
         self.tracing_id = other.tracing_id;
         self.paging_state = other.paging_state;
         self.col_specs = other.col_specs;
+    }
+
+    pub fn get_paging_state(&self) -> Option<&Bytes> {
+        self.rows.and_then(|r| r.metadata.paging_state.as_ref())
+    }
+
+    pub fn get_col_specs(&self) -> &[ColumnSpec] {
+        self.rows.map_or(&[], |r| &r.metadata.col_specs)
     }
 }
 

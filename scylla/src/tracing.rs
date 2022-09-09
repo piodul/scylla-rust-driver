@@ -6,7 +6,10 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::cql_to_rust::{FromRow, FromRowError};
+use crate::frame::response::raw_result::{DeserializableFromRow, ValueIterator};
+use crate::frame::response::result::ColumnSpec;
 use crate::frame::response::result::Row;
+use crate::frame::{frame_errors::ParseError, value::Time};
 
 /// Tracing info retrieved from `system_traces.sessions`
 /// with all events from `system_traces.events`
@@ -68,6 +71,40 @@ pub(crate) const TRACES_EVENTS_QUERY_STR: &str =
     "SELECT event_id, activity, source, source_elapsed, thread \
     FROM system_traces.events WHERE session_id = ?";
 
+type TracingInfoTuple = (
+    Option<IpAddr>,
+    Option<String>,
+    Option<IpAddr>,
+    Option<i32>,
+    Option<HashMap<String, String>>,
+    Option<String>,
+    Option<Time>,
+);
+
+impl<'rows> DeserializableFromRow<'rows> for TracingInfo {
+    type Target = Self;
+
+    fn type_check(typs: &[ColumnSpec]) -> Result<(), ParseError> {
+        <TracingInfoTuple as DeserializableFromRow<'rows>>::type_check(typs)
+    }
+
+    fn deserialize(row: ValueIterator<'rows>) -> Result<Self::Target, ParseError> {
+        let (client, command, coordinator, duration, parameters, request, started_at) =
+            <TracingInfoTuple as DeserializableFromRow<'rows>>::deserialize(row)?;
+
+        Ok(Self {
+            client,
+            command,
+            coordinator,
+            duration,
+            parameters,
+            request,
+            started_at: started_at.map(|x| x.0),
+            events: Vec::new(),
+        })
+    }
+}
+
 // Converts a row received by performing TRACES_SESSION_QUERY_STR to TracingInfo
 impl FromRow for TracingInfo {
     fn from_row(row: Row) -> Result<TracingInfo, FromRowError> {
@@ -91,6 +128,35 @@ impl FromRow for TracingInfo {
             request,
             started_at,
             events: Vec::new(),
+        })
+    }
+}
+
+type TracingEventTuple = (
+    Uuid,
+    Option<String>,
+    Option<IpAddr>,
+    Option<i32>,
+    Option<String>,
+);
+
+impl<'rows> DeserializableFromRow<'rows> for TracingEvent {
+    type Target = Self;
+
+    fn type_check(typs: &[ColumnSpec]) -> Result<(), ParseError> {
+        <TracingEventTuple as DeserializableFromRow<'rows>>::type_check(typs)
+    }
+
+    fn deserialize(row: ValueIterator<'rows>) -> Result<Self::Target, ParseError> {
+        let (event_id, activity, source, source_elapsed, thread) =
+            <TracingEventTuple as DeserializableFromRow<'rows>>::deserialize(row)?;
+
+        Ok(Self {
+            event_id,
+            activity,
+            source,
+            source_elapsed,
+            thread,
         })
     }
 }

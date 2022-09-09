@@ -1022,7 +1022,7 @@ impl Session {
             .ok_or(QueryError::ProtocolError(
                 "Response to system_traces.sessions query was not Rows",
             ))?
-            .into_typed::<TracingInfo>()
+            .as_typed::<TracingInfo>()?
             .next();
 
         let mut tracing_info: TracingInfo = match tracing_info_row_res {
@@ -1037,10 +1037,11 @@ impl Session {
         // Get tracing events
         let tracing_event_rows = traces_events_res
             .rows
+            .as_ref()
             .ok_or(QueryError::ProtocolError(
                 "Response to system_traces.events query was not Rows",
             ))?
-            .into_typed::<TracingEvent>();
+            .as_typed::<TracingEvent>()?;
 
         for event in tracing_event_rows {
             let tracing_event: TracingEvent = event.map_err(|_| {

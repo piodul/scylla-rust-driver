@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::net::IpAddr;
 
 // TODO: Need a VERY detailed comment describing the types available
@@ -616,6 +618,28 @@ where
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.remaining, Some(self.remaining))
+    }
+}
+
+// TODO: Make generic over hash state
+impl<'rows, K, V> DeserializableFromValue<'rows> for HashMap<K, V>
+where
+    K: DeserializableFromValue<'rows> + 'rows,
+    V: DeserializableFromValue<'rows> + 'rows,
+    <K as DeserializableFromValue<'rows>>::Target: Hash + Eq,
+{
+    type Target = HashMap<
+        <K as DeserializableFromValue<'rows>>::Target,
+        <V as DeserializableFromValue<'rows>>::Target,
+    >;
+
+    fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
+        ensure_map_type::<K, V>(typ)
+    }
+
+    fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {
+        let iter = MapIterator::<'rows, K, V>::deserialize(v)?;
+        iter.collect()
     }
 }
 

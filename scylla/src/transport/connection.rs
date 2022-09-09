@@ -166,14 +166,10 @@ impl QueryResponse {
     }
 
     pub fn into_query_result(self) -> Result<QueryResult, QueryError> {
-        let (rows, paging_state, col_specs) = match self.response {
+        let rows = match self.response {
             Response::Error(err) => return Err(err.into()),
-            Response::Result(result::Result::Rows(rs)) => (
-                Some(rs.rows),
-                rs.metadata.paging_state,
-                rs.metadata.col_specs,
-            ),
-            Response::Result(_) => (None, None, vec![]),
+            Response::Result(result::Result::Rows(rs)) => Some(rs),
+            Response::Result(_) => None,
             _ => {
                 return Err(QueryError::ProtocolError(
                     "Unexpected server response, expected Result or Error",
@@ -185,8 +181,6 @@ impl QueryResponse {
             rows,
             warnings: self.warnings,
             tracing_id: self.tracing_id,
-            paging_state,
-            col_specs,
         })
     }
 }
@@ -408,13 +402,13 @@ impl Connection {
 
         loop {
             // Send next paged query
-            let mut cur_result: QueryResult = self
+            let cur_result: QueryResult = self
                 .query(query, &serialized_values, paging_state)
                 .await?
                 .into_query_result()?;
 
             // Set paging_state for the next query
-            paging_state = cur_result.paging_state.take();
+            paging_state = cur_result.get_paging_state().cloned();
 
             // Add current query results to the final_result
             final_result.merge_with_next_page_res(cur_result);
@@ -507,12 +501,12 @@ impl Connection {
 
         loop {
             // Send next paged query
-            let mut cur_result: QueryResult = self
+            let cur_result: QueryResult = self
                 .execute_single_page(prepared_statement, &serialized_values, paging_state)
                 .await?;
 
             // Set paging_state for the next query
-            paging_state = cur_result.paging_state.take();
+            paging_state = cur_result.get_paging_state().cloned();
 
             // Add current query results to the final_result
             final_result.merge_with_next_page_res(cur_result);
@@ -658,7 +652,7 @@ impl Connection {
             .await?
             .rows
             .ok_or(QueryError::ProtocolError("Version query returned not rows"))?
-            .as_typed::<(Uuid,)>()
+            .as_typed::<(Uuid,)>()?
             .next()
             .ok_or(QueryError::ProtocolError("Admin table returned empty rows"))?
             .map_err(|_| QueryError::ProtocolError("Row is not uuid type as it should be"))?;

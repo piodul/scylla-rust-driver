@@ -380,7 +380,7 @@ pub struct Rows {
 }
 
 impl Rows {
-    pub fn as_cql_rows(self) -> StdResult<Vec<Row>, ParseError> {
+    pub fn as_cql_rows(&self) -> StdResult<Vec<Row>, ParseError> {
         type CellType = Option<CqlValue>;
         type RowType = Vec<CellType>;
 
@@ -409,6 +409,14 @@ impl Rows {
             col_specs: &self.metadata.col_specs,
             remaining_rows: self.rows_count,
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows_count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows_count == 0
     }
 }
 
