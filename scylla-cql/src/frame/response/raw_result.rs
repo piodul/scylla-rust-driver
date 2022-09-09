@@ -1,5 +1,8 @@
 use std::net::IpAddr;
 
+// TODO: Need a VERY detailed comment describing the types available
+// for deserialization
+
 use super::result::{self, ColumnSpec, ColumnType, CqlValue};
 use crate::frame::{
     frame_errors::ParseError,
@@ -156,6 +159,80 @@ where
         row.map(|v| v.and_then(T::deserialize)).collect()
     }
 }
+
+macro_rules! impl_tuple_row {
+    ($($Ti:ident),* ; $($FieldI:tt),*) => {
+        impl<'rows, $($Ti),*> DeserializableFromRow<'rows> for ($($Ti,)*)
+        where
+            $($Ti: DeserializableFromValue<'rows>),*
+        {
+            type Target = (
+                $(<$Ti as DeserializableFromValue<'rows>>::Target,)*
+            );
+
+            fn type_check(specs: &[ColumnSpec]) -> Result<(), ParseError> {
+                const TUPLE_LEN: usize = [0, $($FieldI),*].len() - 1;
+                if TUPLE_LEN != specs.len() {
+                    return Err(ParseError::BadData(format!(
+                        "Expected row size {:?}, but got {:?}",
+                        TUPLE_LEN, specs.len(),
+                    )));
+                }
+
+                // TODO: More context about which field had the wrong type
+                // TODO: Does this result in runtime bound checking? Can we
+                // rephrase the code so that it can't happen? (e.g. by matching
+                // on an array)
+                $(
+                    <$Ti as DeserializableFromValue<'rows>>::type_check(&specs[$FieldI].typ)?;
+                )*
+
+                Ok(())
+            }
+
+            fn deserialize(mut row: ValueIterator<'rows>) -> Result<Self::Target, ParseError> {
+                // TODO: More context about which column failed to deserialize
+
+                const TUPLE_LEN: usize = [0, $($FieldI),*].len() - 1;
+                let tup = (
+                    $(
+                        {
+                            let cell = row.next()
+                                .ok_or_else(|| ParseError::BadData(format!(
+                                    "Row is too short, expected {:?} elements but only got {:?}",
+                                    TUPLE_LEN, $FieldI,
+                                )))??;
+                            <$Ti as DeserializableFromValue<'rows>>::deserialize(cell)?
+                        },
+                    )*
+                );
+                if row.next().is_some() {
+                    return Err(ParseError::BadData(format!(
+                        "Row is too long, expected {:?} elements but it got more",
+                        TUPLE_LEN,
+                    )));
+                }
+                Ok(tup)
+            }
+        }
+    };
+}
+
+macro_rules! impl_tuples_row {
+    ($TN:ident ; $FieldN:tt) => {
+        impl_tuple_row!( ; );
+        impl_tuple_row!($TN ; $FieldN);
+    };
+    ($TN:ident, $($Ti:ident),* ; $FieldN:tt, $($FieldI:tt),*) => {
+        impl_tuples_row!($($Ti),* ; $($FieldI),*);
+        impl_tuple_row!($TN, $($Ti),* ; $FieldN, $($FieldI),*);
+    };
+}
+
+impl_tuples_row!(
+    T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15;
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+);
 
 impl<'rows> DeserializableFromValue<'rows> for CqlValue {
     type Target = CqlValue;
@@ -391,43 +468,162 @@ impl<'rows> DeserializableFromValue<'rows> for uuid::Uuid {
 
 // Set and List
 pub struct SequenceIterator<'rows, T> {
+    remaining: usize,
     mem: &'rows [u8],
+    el_type: &'rows ColumnType,
     phantom_data: std::marker::PhantomData<T>,
 }
 
 impl<'rows, T> DeserializableFromValue<'rows> for SequenceIterator<'rows, T>
 where
-    T: DeserializableFromValue<'rows>,
+    T: DeserializableFromValue<'rows> + 'rows,
 {
-    type Target = SequenceIterator<'rows>;
+    type Target = SequenceIterator<'rows, T>;
 
     fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
         ensure_sequence_type::<T>(typ)
     }
 
-    fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {}
+    fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {
+        let mut value = ensure_not_null(v.value)?;
+        let count = types::read_int_length(&mut value)?;
+        let el_type = match &v.typ {
+            ColumnType::Set(el) | ColumnType::List(el) => el,
+            _ => return Err(ParseError::BadData("not a collection".to_string())),
+        };
+        Ok(Self {
+            remaining: count,
+            mem: value,
+            el_type,
+            phantom_data: std::marker::PhantomData,
+        })
+    }
 }
 
-// impl<'rows, T> DeserializableFromValue<'rows> for Vec<T>
-// where
-//     T: DeserializableFromValue<'rows>,
-// {
-//     type Target = Vec<T>;
+impl<'rows, T> Iterator for SequenceIterator<'rows, T>
+where
+    T: DeserializableFromValue<'rows> + 'rows,
+{
+    type Item = Result<<T as DeserializableFromValue<'rows>>::Target, ParseError>;
 
-//     fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
-//         match typ {
-//             ColumnType::List(el) | ColumnType::Set(el) => T::type_check(el),
-//             _ => Err(ParseError::BadData(format!(
-//                 "Expected set or list, got {:?}",
-//                 typ
-//             ))),
-//         }
-//     }
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            None
+        } else {
+            self.remaining -= 1;
+            Some(types::read_bytes_opt(&mut self.mem).and_then(|mem| {
+                let rv = RawValue {
+                    typ: self.el_type,
+                    value: mem,
+                };
+                <T as DeserializableFromValue<'rows>>::deserialize(rv)
+            }))
+        }
+    }
 
-//     fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
 
-//     }
-// }
+impl<'rows, T> DeserializableFromValue<'rows> for Vec<T>
+where
+    T: DeserializableFromValue<'rows> + 'rows,
+{
+    type Target = Vec<<T as DeserializableFromValue<'rows>>::Target>;
+
+    fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
+        ensure_sequence_type::<T>(typ)
+    }
+
+    fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {
+        let iter = SequenceIterator::<'rows, T>::deserialize(v)?;
+        iter.collect()
+    }
+}
+
+// Maps
+pub struct MapIterator<'rows, K, V> {
+    remaining: usize,
+    mem: &'rows [u8],
+    key_type: &'rows ColumnType,
+    value_type: &'rows ColumnType,
+    phantom_data: std::marker::PhantomData<(K, V)>,
+}
+
+impl<'rows, K, V> DeserializableFromValue<'rows> for MapIterator<'rows, K, V>
+where
+    K: DeserializableFromValue<'rows> + 'rows,
+    V: DeserializableFromValue<'rows> + 'rows,
+{
+    type Target = MapIterator<'rows, K, V>;
+
+    fn type_check(typ: &ColumnType) -> Result<(), ParseError> {
+        ensure_map_type::<K, V>(typ)
+    }
+
+    fn deserialize(v: RawValue<'rows>) -> Result<Self::Target, ParseError> {
+        let mut value = ensure_not_null(v.value)?;
+        let count = types::read_int_length(&mut value)?;
+        let (key_type, value_type) = match &v.typ {
+            ColumnType::Map(k, v) => (k, v),
+            _ => return Err(ParseError::BadData("not a map".to_string())),
+        };
+        Ok(Self {
+            remaining: count,
+            mem: value,
+            key_type,
+            value_type,
+            phantom_data: std::marker::PhantomData,
+        })
+    }
+}
+
+impl<'rows, K, V> Iterator for MapIterator<'rows, K, V>
+where
+    K: DeserializableFromValue<'rows> + 'rows,
+    V: DeserializableFromValue<'rows> + 'rows,
+{
+    type Item = Result<
+        (
+            <K as DeserializableFromValue<'rows>>::Target,
+            <V as DeserializableFromValue<'rows>>::Target,
+        ),
+        ParseError,
+    >;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            None
+        } else {
+            self.remaining -= 1;
+            let mut parse_pair = || -> Self::Item {
+                let key_rv = RawValue {
+                    typ: self.key_type,
+                    value: types::read_bytes_opt(&mut self.mem)?,
+                };
+                let key = K::deserialize(key_rv)?;
+                let value_rv = RawValue {
+                    typ: self.value_type,
+                    value: types::read_bytes_opt(&mut self.mem)?,
+                };
+                let value = V::deserialize(value_rv)?;
+                Ok((key, value))
+            };
+            Some(parse_pair())
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+// TODO: Conversion to HashMap, BTreeMap, etc.?
+
+// TODO: UDTs
+// TODO: Tuples
+// The above should be automatically with proc or non-proc macros
 
 fn ensure_sequence_type<'rows, T>(typ: &ColumnType) -> Result<(), ParseError>
 where
@@ -440,6 +636,22 @@ where
             "Expected set or list, got {:?}",
             typ
         ))),
+    }
+}
+
+fn ensure_map_type<'rows, K, V>(typ: &ColumnType) -> Result<(), ParseError>
+where
+    K: DeserializableFromValue<'rows>,
+    V: DeserializableFromValue<'rows>,
+{
+    // TODO: Add more information to context in case the type check fails
+    match typ {
+        ColumnType::Map(k, v) => {
+            K::type_check(k)?;
+            V::type_check(v)?;
+            Ok(())
+        }
+        _ => Err(ParseError::BadData(format!("Expected map, fot {:?}", typ))),
     }
 }
 
