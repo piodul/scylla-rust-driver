@@ -509,18 +509,15 @@ where
     type Item = Result<<T as DeserializableFromValue<'rows>>::Target, ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            None
-        } else {
-            self.remaining -= 1;
-            Some(types::read_bytes_opt(&mut self.mem).and_then(|mem| {
-                let rv = RawValue {
-                    typ: self.el_type,
-                    value: mem,
-                };
-                <T as DeserializableFromValue<'rows>>::deserialize(rv)
-            }))
-        }
+        self.remaining = self.remaining.checked_sub(1)?;
+
+        Some(types::read_bytes_opt(&mut self.mem).and_then(|mem| {
+            let rv = RawValue {
+                typ: self.el_type,
+                value: mem,
+            };
+            <T as DeserializableFromValue<'rows>>::deserialize(rv)
+        }))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
