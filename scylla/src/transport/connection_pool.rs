@@ -433,7 +433,11 @@ impl Keepaliver {
 
     async fn send_keepalive_query(connection: Arc<Connection>) {
         if let Err(err) = connection
-            .query_single_page("select key from system.local where key = 'local'", &[])
+            .query_single_page(
+                "select key from system.local where key = 'local'",
+                &[],
+                None, /* TODO: Timeout? */
+            )
             .await
         {
             warn!(

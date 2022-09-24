@@ -403,12 +403,12 @@ async fn query_peers(
     let mut peers_query =
         Query::new("select rpc_address, data_center, rack, tokens from system.peers");
     peers_query.set_page_size(1024);
-    let peers_query_future = conn.query_all(&peers_query, &[]);
+    let peers_query_future = conn.query_all(&peers_query, &[], None);
 
     let mut local_query =
         Query::new("select rpc_address, data_center, rack, tokens from system.local");
     local_query.set_page_size(1024);
-    let local_query_future = conn.query_all(&local_query, &[]);
+    let local_query_future = conn.query_all(&local_query, &[], None);
 
     let (peers_res, local_res) = tokio::try_join!(peers_query_future, local_query_future)?;
 
@@ -509,13 +509,13 @@ async fn query_keyspaces(
         Query::new("select keyspace_name, replication from system_schema.keyspaces");
     keyspaces_query.set_page_size(1024);
 
-    let rows =
-        conn.query_all(&keyspaces_query, &[])
-            .await?
-            .rows
-            .ok_or(QueryError::ProtocolError(
-                "system_schema.keyspaces query response was not Rows",
-            ))?;
+    let rows = conn
+        .query_all(&keyspaces_query, &[], None)
+        .await?
+        .rows
+        .ok_or(QueryError::ProtocolError(
+            "system_schema.keyspaces query response was not Rows",
+        ))?;
 
     let mut result = HashMap::with_capacity(rows.len());
     let (mut all_tables, mut all_views, mut all_user_defined_types) = if fetch_schema {
@@ -563,7 +563,7 @@ async fn query_user_defined_types(
     user_defined_types_query.set_page_size(1024);
 
     let rows = conn
-        .query_all(&user_defined_types_query, &[])
+        .query_all(&user_defined_types_query, &[], None)
         .await?
         .rows
         .ok_or(QueryError::ProtocolError(
@@ -598,13 +598,13 @@ async fn query_tables(
     let mut tables_query = Query::new("SELECT keyspace_name, table_name FROM system_schema.tables");
     tables_query.set_page_size(1024);
 
-    let rows = conn
-        .query_all(&tables_query, &[])
-        .await?
-        .rows
-        .ok_or(QueryError::ProtocolError(
-            "system_schema.tables query response was not Rows",
-        ))?;
+    let rows =
+        conn.query_all(&tables_query, &[], None)
+            .await?
+            .rows
+            .ok_or(QueryError::ProtocolError(
+                "system_schema.tables query response was not Rows",
+            ))?;
 
     let mut result = HashMap::with_capacity(rows.len());
     let mut tables = query_tables_schema(conn).await?;
@@ -639,13 +639,13 @@ async fn query_views(
         Query::new("SELECT keyspace_name, view_name, base_table_name FROM system_schema.views");
     views_query.set_page_size(1024);
 
-    let rows = conn
-        .query_all(&views_query, &[])
-        .await?
-        .rows
-        .ok_or(QueryError::ProtocolError(
-            "system_schema.views query response was not Rows",
-        ))?;
+    let rows =
+        conn.query_all(&views_query, &[], None)
+            .await?
+            .rows
+            .ok_or(QueryError::ProtocolError(
+                "system_schema.views query response was not Rows",
+            ))?;
 
     let mut result = HashMap::with_capacity(rows.len());
     let mut tables = query_tables_schema(conn).await?;
@@ -691,7 +691,7 @@ async fn query_tables_schema(
     columns_query.set_page_size(1024);
 
     let rows = conn
-        .query_all(&columns_query, &[])
+        .query_all(&columns_query, &[], None)
         .await?
         .rows
         .ok_or(QueryError::ProtocolError(
@@ -899,7 +899,7 @@ async fn query_table_partitioners(
     );
     partitioner_query.set_page_size(1024);
 
-    let rows = match conn.query_all(&partitioner_query, &[]).await {
+    let rows = match conn.query_all(&partitioner_query, &[], None).await {
         // FIXME: This match catches all database errors with this error code despite the fact
         // that we are only interested in the ones resulting from non-existent table
         // system_schema.scylla_tables.

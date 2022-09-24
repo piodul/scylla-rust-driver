@@ -16,7 +16,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::lookup_host;
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 use tracing::{debug, error, trace, trace_span, Instrument};
 use uuid::Uuid;
 
@@ -533,6 +533,9 @@ impl Session {
         let query: Query = query.into();
         let serialized_values = values.serialized()?;
 
+        let timeout = query.config.request_timeout.or(self.request_timeout);
+        let deadline = timeout.map(|t| Instant::now() + t);
+
         let span = trace_span!("Request", query = query.contents.as_str());
         let run_query_result = self
             .run_query(
@@ -551,6 +554,7 @@ impl Session {
                                 values_ref,
                                 consistency,
                                 paging_state_ref.clone(),
+                                deadline,
                             )
                             .await
                             .and_then(QueryResponse::into_non_error_query_response)
@@ -671,6 +675,7 @@ impl Session {
             query,
             serialized_values.into_owned(),
             self.default_consistency,
+            self.request_timeout,
             retry_session,
             self.load_balancer.clone(),
             self.cluster.get_data(),
@@ -839,6 +844,9 @@ impl Session {
 
         let token = self.calculate_token(prepared, &serialized_values)?;
 
+        let timeout = prepared.config.request_timeout.or(self.request_timeout);
+        let deadline = timeout.map(|t| Instant::now() + t);
+
         let statement_info = Statement {
             token,
             keyspace: prepared.get_keyspace_name(),
@@ -865,6 +873,7 @@ impl Session {
                             values_ref,
                             consistency,
                             paging_state_ref.clone(),
+                            deadline,
                         )
                         .await
                         .and_then(QueryResponse::into_non_error_query_response)
@@ -953,6 +962,7 @@ impl Session {
             prepared,
             values: serialized_values.into_owned(),
             default_consistency: self.default_consistency,
+            default_request_timeout: self.request_timeout,
             token,
             retry_session,
             load_balancer: self.load_balancer.clone(),
@@ -1412,19 +1422,7 @@ impl Session {
             }
         };
 
-        let effective_timeout = statement_config.request_timeout.or(self.request_timeout);
-        let result = match effective_timeout {
-            Some(timeout) => tokio::time::timeout(timeout, runner)
-                .await
-                .unwrap_or_else(|e| {
-                    Err(QueryError::RequestTimeout(format!(
-                        "Request took longer than {}ms: {}",
-                        timeout.as_millis(),
-                        e
-                    )))
-                }),
-            None => runner.await,
-        };
+        let result = runner.await;
 
         if let Some((history_listener, query_id)) = history_listener_and_id {
             match &result {

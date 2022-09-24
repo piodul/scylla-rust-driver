@@ -6,12 +6,14 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::Stream;
 use std::result::Result;
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use super::errors::QueryError;
 use crate::cql_to_rust::{FromRow, FromRowError};
@@ -72,6 +74,7 @@ pub(crate) struct PreparedIteratorConfig {
     pub prepared: PreparedStatement,
     pub values: SerializedValues,
     pub default_consistency: Consistency,
+    pub default_request_timeout: Option<Duration>,
     pub token: Option<Token>,
     pub retry_session: Box<dyn RetrySession>,
     pub load_balancer: Arc<dyn LoadBalancingPolicy>,
@@ -126,10 +129,12 @@ impl RowIterator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_for_query(
         mut query: Query,
         values: SerializedValues,
         default_consistency: Consistency,
+        default_request_timeout: Option<Duration>,
         retry_session: Box<dyn RetrySession>,
         load_balancer: Arc<dyn LoadBalancingPolicy>,
         cluster_data: Arc<ClusterData>,
@@ -140,6 +145,8 @@ impl RowIterator {
         }
         let (sender, mut receiver) = mpsc::channel(1);
         let consistency = query.config.determine_consistency(default_consistency);
+        let timeout = query.config.request_timeout.or(default_request_timeout);
+        let deadline = timeout.map(|t| Instant::now() + t);
 
         let worker_task = async move {
             let query_ref = &query;
@@ -151,7 +158,13 @@ impl RowIterator {
                               consistency: Consistency,
                               paging_state: Option<Bytes>| async move {
                 connection
-                    .query_with_consistency(query_ref, values_ref, consistency, paging_state)
+                    .query_with_consistency(
+                        query_ref,
+                        values_ref,
+                        consistency,
+                        paging_state,
+                        deadline,
+                    )
                     .await
             };
 
@@ -201,6 +214,10 @@ impl RowIterator {
             .prepared
             .config
             .determine_consistency(config.default_consistency);
+        let timeout = config
+            .default_request_timeout
+            .or_else(|| config.prepared.get_request_timeout());
+        let deadline = timeout.map(|t| Instant::now() + t);
 
         let statement_info = Statement {
             token: config.token,
@@ -223,7 +240,13 @@ impl RowIterator {
                               consistency: Consistency,
                               paging_state: Option<Bytes>| async move {
                 connection
-                    .execute_with_consistency(prepared_ref, values_ref, consistency, paging_state)
+                    .execute_with_consistency(
+                        prepared_ref,
+                        values_ref,
+                        consistency,
+                        paging_state,
+                        deadline,
+                    )
                     .await
             };
 

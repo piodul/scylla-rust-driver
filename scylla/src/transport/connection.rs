@@ -17,10 +17,12 @@ use tokio_openssl::SslStream;
 
 use std::collections::{BTreeSet, HashMap};
 use std::convert::TryFrom;
+use std::future::Future;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::task::{Context, Poll, Waker};
 use std::{
     cmp::Ordering,
     net::{Ipv4Addr, Ipv6Addr},
@@ -97,6 +99,7 @@ type RequestId = u64;
 struct ResponseHandler {
     response_sender: oneshot::Sender<Result<TaskResponse, QueryError>>,
     request_id: RequestId,
+    deadline: Option<Instant>,
 }
 
 // Used to notify `Connection::orphaner` about `Connection::send_request`
@@ -315,14 +318,24 @@ impl Connection {
 
     pub async fn startup(&self, options: HashMap<String, String>) -> Result<Response, QueryError> {
         Ok(self
-            .send_request(&request::Startup { options }, false, false)
+            .send_request(
+                &request::Startup { options },
+                false,
+                false,
+                None, /* TODO: Timeout? */
+            )
             .await?
             .response)
     }
 
     pub async fn get_options(&self) -> Result<Response, QueryError> {
         Ok(self
-            .send_request(&request::Options {}, false, false)
+            .send_request(
+                &request::Options {},
+                false,
+                false,
+                None, /* TODO: Timeout? */
+            )
             .await?
             .response)
     }
@@ -335,6 +348,7 @@ impl Connection {
                 },
                 true,
                 query.config.tracing,
+                None, /* TODO: Timeout? */
             )
             .await?;
 
@@ -392,6 +406,7 @@ impl Connection {
             },
             false,
             false,
+            None, /* TODO: Timeout? */
         )
         .await
     }
@@ -400,12 +415,13 @@ impl Connection {
         &self,
         query: impl Into<Query>,
         values: impl ValueList,
+        deadline: Option<Instant>,
     ) -> Result<QueryResult, QueryError> {
         let query: Query = query.into();
         let consistency = query
             .config
             .determine_consistency(self.config.default_consistency);
-        self.query_single_page_with_consistency(query, &values, consistency)
+        self.query_single_page_with_consistency(query, &values, consistency, deadline)
             .await
     }
 
@@ -414,9 +430,10 @@ impl Connection {
         query: impl Into<Query>,
         values: impl ValueList,
         consistency: Consistency,
+        deadline: Option<Instant>,
     ) -> Result<QueryResult, QueryError> {
         let query: Query = query.into();
-        self.query_with_consistency(&query, &values, consistency, None)
+        self.query_with_consistency(&query, &values, consistency, None, deadline)
             .await?
             .into_query_result()
     }
@@ -426,6 +443,7 @@ impl Connection {
         query: &Query,
         values: impl ValueList,
         paging_state: Option<Bytes>,
+        deadline: Option<Instant>,
     ) -> Result<QueryResponse, QueryError> {
         self.query_with_consistency(
             query,
@@ -434,6 +452,7 @@ impl Connection {
                 .config
                 .determine_consistency(self.config.default_consistency),
             paging_state,
+            deadline,
         )
         .await
     }
@@ -444,6 +463,7 @@ impl Connection {
         values: impl ValueList,
         consistency: Consistency,
         paging_state: Option<Bytes>,
+        deadline: Option<Instant>,
     ) -> Result<QueryResponse, QueryError> {
         let serialized_values = values.serialized()?;
 
@@ -459,7 +479,7 @@ impl Connection {
             },
         };
 
-        self.send_request(&query_frame, true, query.config.tracing)
+        self.send_request(&query_frame, true, query.config.tracing, deadline)
             .await
     }
 
@@ -468,6 +488,7 @@ impl Connection {
         &self,
         query: &Query,
         values: impl ValueList,
+        deadline: Option<Instant>,
     ) -> Result<QueryResult, QueryError> {
         self.query_all_with_consistency(
             query,
@@ -475,6 +496,7 @@ impl Connection {
             query
                 .config
                 .determine_consistency(self.config.default_consistency),
+            deadline,
         )
         .await
     }
@@ -484,6 +506,7 @@ impl Connection {
         query: &Query,
         values: impl ValueList,
         consistency: Consistency,
+        deadline: Option<Instant>,
     ) -> Result<QueryResult, QueryError> {
         if query.get_page_size().is_none() {
             // Page size should be set when someone wants to use paging
@@ -504,7 +527,13 @@ impl Connection {
         loop {
             // Send next paged query
             let mut cur_result: QueryResult = self
-                .query_with_consistency(query, &serialized_values, consistency, paging_state)
+                .query_with_consistency(
+                    query,
+                    &serialized_values,
+                    consistency,
+                    paging_state,
+                    deadline,
+                )
                 .await?
                 .into_query_result()?;
 
@@ -526,8 +555,9 @@ impl Connection {
         prepared_statement: &PreparedStatement,
         values: impl ValueList,
         paging_state: Option<Bytes>,
+        deadline: Option<Instant>,
     ) -> Result<QueryResult, QueryError> {
-        self.execute(prepared_statement, values, paging_state)
+        self.execute(prepared_statement, values, paging_state, deadline)
             .await?
             .into_query_result()
     }
@@ -537,6 +567,7 @@ impl Connection {
         prepared_statement: &PreparedStatement,
         values: impl ValueList,
         paging_state: Option<Bytes>,
+        deadline: Option<Instant>,
     ) -> Result<QueryResponse, QueryError> {
         self.execute_with_consistency(
             prepared_statement,
@@ -545,6 +576,7 @@ impl Connection {
                 .config
                 .determine_consistency(self.config.default_consistency),
             paging_state,
+            deadline,
         )
         .await
     }
@@ -555,6 +587,7 @@ impl Connection {
         values: impl ValueList,
         consistency: Consistency,
         paging_state: Option<Bytes>,
+        deadline: Option<Instant>,
     ) -> Result<QueryResponse, QueryError> {
         let serialized_values = values.serialized()?;
 
@@ -571,7 +604,12 @@ impl Connection {
         };
 
         let query_response = self
-            .send_request(&execute_frame, true, prepared_statement.config.tracing)
+            .send_request(
+                &execute_frame,
+                true,
+                prepared_statement.config.tracing,
+                deadline,
+            )
             .await?;
 
         match &query_response.response {
@@ -581,10 +619,15 @@ impl Connection {
             }) => {
                 debug!("Connection::execute: Got DbError::Unprepared - repreparing statement with id {:?}", statement_id);
                 // Repreparation of a statement is needed
-                self.reprepare(prepared_statement.get_statement(), prepared_statement)
+                self.reprepare(prepared_statement.get_statement(), prepared_statement) // TODO: Pass a timeout to reprepare
                     .await?;
-                self.send_request(&execute_frame, true, prepared_statement.config.tracing)
-                    .await
+                self.send_request(
+                    &execute_frame,
+                    true,
+                    prepared_statement.config.tracing,
+                    deadline,
+                )
+                .await
             }
             _ => Ok(query_response),
         }
@@ -596,6 +639,7 @@ impl Connection {
         &self,
         prepared_statement: &PreparedStatement,
         values: impl ValueList,
+        deadline: Option<Instant>,
     ) -> Result<QueryResult, QueryError> {
         if prepared_statement.get_page_size().is_none() {
             return Err(QueryError::BadQuery(BadQuery::Other(
@@ -611,7 +655,12 @@ impl Connection {
         loop {
             // Send next paged query
             let mut cur_result: QueryResult = self
-                .execute_single_page(prepared_statement, &serialized_values, paging_state)
+                .execute_single_page(
+                    prepared_statement,
+                    &serialized_values,
+                    paging_state,
+                    deadline,
+                )
                 .await?;
 
             // Set paging_state for the next query
@@ -676,7 +725,12 @@ impl Connection {
 
         loop {
             let query_response = self
-                .send_request(&batch_frame, true, batch.config.tracing)
+                .send_request(
+                    &batch_frame,
+                    true,
+                    batch.config.tracing,
+                    None, /* TODO: Timeout? */
+                )
                 .await?;
 
             return match query_response.response {
@@ -722,7 +776,9 @@ impl Connection {
             false => format!("USE {}", keyspace_name.as_str()).into(),
         };
 
-        let query_response = self.query(&query, (), None).await?;
+        let query_response = self
+            .query(&query, (), None, None /* TODO: Timeout? */)
+            .await?;
 
         match query_response.response {
             Response::Result(result::Result::SetKeyspace(set_keyspace)) => {
@@ -752,7 +808,7 @@ impl Connection {
         };
 
         match self
-            .send_request(&register_frame, true, false)
+            .send_request(&register_frame, true, false, None /* TODO: Timeout? */)
             .await?
             .response
         {
@@ -766,7 +822,7 @@ impl Connection {
 
     pub async fn fetch_schema_version(&self) -> Result<Uuid, QueryError> {
         let (version_id,): (Uuid,) = self
-            .query_single_page(LOCAL_VERSION, &[])
+            .query_single_page(LOCAL_VERSION, &[], None /* TODO: Timeout? */)
             .await?
             .rows
             .ok_or(QueryError::ProtocolError("Version query returned not rows"))?
@@ -787,6 +843,7 @@ impl Connection {
         request: &R,
         compress: bool,
         tracing: bool,
+        deadline: Option<Instant>,
     ) -> Result<QueryResponse, QueryError> {
         let compression = if compress {
             self.config.compression
@@ -800,6 +857,7 @@ impl Connection {
         let response_handler = ResponseHandler {
             response_sender,
             request_id,
+            deadline,
         };
 
         // Dropping `notifier` (before calling `notifier.disable()`) will send a notification to
@@ -932,9 +990,10 @@ impl Connection {
             &handler_map,
             receiver,
         );
+        let t = Self::timeouter(&handler_map);
         let o = Self::orphaner(&handler_map, orphan_notification_receiver);
 
-        let result = futures::try_join!(r, w, o);
+        let result = futures::try_join!(r, w, t, o);
 
         let error: QueryError = match result {
             Ok(_) => return, // Connection was dropped, we can return
@@ -1112,6 +1171,40 @@ impl Connection {
         }
 
         Ok(())
+    }
+
+    // TODO: Comment
+    async fn timeouter(handler_map: &StdMutex<ResponseHandlerMap>) -> Result<(), QueryError> {
+        futures::future::poll_fn(|cx| -> Poll<Result<(), QueryError>> {
+            // Guaranteed that nobody else locks the handler_map at the moment
+            let mut handler_map_guard = handler_map.try_lock().unwrap();
+
+            // Wait until the deadline of the first request elapses
+            match handler_map_guard.deadline_tracker.poll_first_elapsed(cx) {
+                Poll::Ready(_) => {}
+                Poll::Pending => return Poll::Pending,
+            }
+
+            // Elapse some of the requests
+            let to_elapse = handler_map_guard
+                .deadline_tracker
+                .elapse_before(Instant::now());
+            tracing::debug!("Timing out {} requests", to_elapse.len());
+
+            for request_id in to_elapse {
+                if let Some(handler) = handler_map_guard.orphan(request_id) {
+                    // Ignore sending error, request was dropped
+                    let _ = handler.response_sender.send(Err(QueryError::RequestTimeout(
+                        "request timed out".to_string(), // TODO: include information about deadline?
+                    )));
+                }
+            }
+
+            // Wake the task in order to re-enter it later
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        })
+        .await
     }
 
     async fn handle_event(
@@ -1327,6 +1420,127 @@ async fn connect_with_source_port(
     }
 }
 
+enum DeadlineTimer {
+    Armed(Pin<Box<tokio::time::Sleep>>),
+    Fired,
+    WaitingForRearm(Waker),
+}
+
+impl DeadlineTimer {
+    pub fn new() -> Self {
+        Self::Fired
+    }
+
+    pub fn reset(&mut self, deadline: Instant) {
+        match self {
+            Self::Armed(sleep) => sleep.as_mut().reset(deadline),
+            Self::Fired => *self = Self::Armed(Box::pin(tokio::time::sleep_until(deadline))),
+            Self::WaitingForRearm(waker) => {
+                waker.wake_by_ref();
+                *self = Self::Armed(Box::pin(tokio::time::sleep_until(deadline)))
+            }
+        }
+    }
+
+    pub fn deadline(&self) -> Option<Instant> {
+        match self {
+            Self::Armed(sleep) => Some(sleep.deadline()),
+            _ => None,
+        }
+    }
+}
+
+impl Future for DeadlineTimer {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut *self {
+            Self::Armed(ref mut sleep) => {
+                match sleep.as_mut().poll(cx) {
+                    Poll::Ready(_) => {}
+                    Poll::Pending => return Poll::Pending,
+                }
+                *self = Self::Fired;
+                Poll::Ready(())
+            }
+            Self::Fired | Self::WaitingForRearm(_) => {
+                *self = Self::WaitingForRearm(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+struct DeadlineTracker {
+    deadlines: BTreeSet<(Instant, RequestId)>,
+    expiry_timer: Pin<Box<DeadlineTimer>>,
+}
+
+impl DeadlineTracker {
+    pub fn new() -> Self {
+        Self {
+            deadlines: BTreeSet::new(),
+            expiry_timer: Box::pin(DeadlineTimer::new()),
+        }
+    }
+
+    pub fn poll_first_elapsed(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        self.expiry_timer.as_mut().poll(cx)
+    }
+
+    // TODO: convert into an iterator? No need to allocate Vec
+    // On the other hand, we avoid lifetime issues and the vector
+    // will usually be empty, which does not allocate
+    pub fn elapse_before(&mut self, now: Instant) -> Vec<RequestId> {
+        let mut ret = Vec::new();
+        loop {
+            match self.deadlines.iter().next().cloned() {
+                Some((deadline, request_id)) if deadline < now => {
+                    ret.push(request_id);
+                    self.deadlines.remove(&(deadline, request_id));
+                }
+                _ => break,
+            }
+        }
+        self.update_deadline_timer();
+        ret
+    }
+
+    pub fn add_request(&mut self, response_handler: &ResponseHandler) {
+        if let Some(deadline) = response_handler.deadline {
+            self.deadlines
+                .insert((deadline, response_handler.request_id));
+            self.update_deadline_timer();
+        }
+    }
+
+    pub fn remove_request(&mut self, response_handler: &ResponseHandler) {
+        if let Some(deadline) = response_handler.deadline {
+            self.deadlines
+                .remove(&(deadline, response_handler.request_id));
+            self.update_deadline_timer();
+        }
+    }
+
+    fn update_deadline_timer(&mut self) {
+        // Only update the deadline if the expiry timer is not set
+        // or the new lowest timeout is smaller than the current one.
+        // This will lead to natural batching and the timer won't have
+        // to be updated so frequently.
+        if let Some((earliest_deadline, _)) = self.deadlines.iter().next().cloned() {
+            let current_deadline = self.expiry_timer.deadline();
+            if current_deadline.map_or(true, |current| earliest_deadline < current) {
+                tracing::trace!(
+                    "Setting new timeouter wakeup time to {:?}, previous {:?}",
+                    earliest_deadline,
+                    current_deadline,
+                );
+                self.expiry_timer.as_mut().reset(earliest_deadline);
+            }
+        }
+    }
+}
+
 struct OrphanageTracker {
     orphans: HashMap<i16, Instant>,
     by_orphaning_times: BTreeSet<(Instant, i16)>,
@@ -1370,8 +1584,8 @@ impl OrphanageTracker {
 struct ResponseHandlerMap {
     stream_set: StreamIdSet,
     handlers: HashMap<i16, ResponseHandler>,
-
     request_to_stream: HashMap<RequestId, i16>,
+    deadline_tracker: DeadlineTracker,
     orphanage_tracker: OrphanageTracker,
 }
 
@@ -1387,6 +1601,7 @@ impl ResponseHandlerMap {
             stream_set: StreamIdSet::new(),
             handlers: HashMap::new(),
             request_to_stream: HashMap::new(),
+            deadline_tracker: DeadlineTracker::new(),
             orphanage_tracker: OrphanageTracker::new(),
         }
     }
@@ -1395,6 +1610,7 @@ impl ResponseHandlerMap {
         if let Some(stream_id) = self.stream_set.allocate() {
             self.request_to_stream
                 .insert(response_handler.request_id, stream_id);
+            self.deadline_tracker.add_request(&response_handler);
             let prev_handler = self.handlers.insert(stream_id, response_handler);
             assert!(prev_handler.is_none());
 
@@ -1406,16 +1622,20 @@ impl ResponseHandlerMap {
 
     // Orphan stream_id (associated with this request_id) by moving it to
     // `orphanage_tracker`, and freeing its handler
-    pub fn orphan(&mut self, request_id: RequestId) {
-        if let Some(stream_id) = self.request_to_stream.get(&request_id) {
+    pub fn orphan(&mut self, request_id: RequestId) -> Option<ResponseHandler> {
+        if let Some(stream_id) = self.request_to_stream.get(&request_id).cloned() {
             debug!(
                 "Orphaning stream_id = {} associated with request_id = {}",
                 stream_id, request_id
             );
-            self.orphanage_tracker.insert(*stream_id);
-            self.handlers.remove(stream_id);
+            self.orphanage_tracker.insert(stream_id);
             self.request_to_stream.remove(&request_id);
+            if let Some(handler) = self.handlers.remove(&stream_id) {
+                self.deadline_tracker.remove_request(&handler);
+                return Some(handler);
+            }
         }
+        None
     }
 
     pub fn old_orphans_count(&self) -> usize {
@@ -1438,6 +1658,7 @@ impl ResponseHandlerMap {
             // prevent marking this `stream_id` as orphaned by some late
             // orphan notification.
             self.request_to_stream.remove(&handler.request_id);
+            self.deadline_tracker.remove_request(&handler);
 
             HandlerLookupResult::Handler(handler)
         } else {
@@ -1582,31 +1803,38 @@ mod tests {
             .unwrap();
         let ks = unique_keyspace_name();
 
-        connection.query_single_page(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
+        connection.query_single_page(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[], None).await.unwrap();
         connection
             .use_keyspace(&super::VerifiedKeyspaceName::new(ks, false).unwrap())
             .await
             .unwrap();
         connection
-            .query_single_page("DROP TABLE IF EXISTS connection_query_all_tab", &[])
+            .query_single_page("DROP TABLE IF EXISTS connection_query_all_tab", &[], None)
             .await
             .unwrap();
         connection
             .query_single_page(
                 "CREATE TABLE IF NOT EXISTS connection_query_all_tab (p int primary key)",
                 &[],
+                None,
             )
             .await
             .unwrap();
 
         // 1. SELECT from an empty table returns query result where rows are Some(Vec::new())
         let select_query = Query::new("SELECT p FROM connection_query_all_tab").with_page_size(7);
-        let empty_res = connection.query_all(&select_query, &[]).await.unwrap();
+        let empty_res = connection
+            .query_all(&select_query, &[], None)
+            .await
+            .unwrap();
         assert!(empty_res.rows.unwrap().is_empty());
 
         let mut prepared_select = connection.prepare(&select_query).await.unwrap();
         prepared_select.set_page_size(7);
-        let empty_res_prepared = connection.execute_all(&prepared_select, &[]).await.unwrap();
+        let empty_res_prepared = connection
+            .execute_all(&prepared_select, &[], None)
+            .await
+            .unwrap();
         assert!(empty_res_prepared.rows.unwrap().is_empty());
 
         // 2. Insert 100 and select using query_all with page_size 7
@@ -1615,13 +1843,13 @@ mod tests {
         let insert_query =
             Query::new("INSERT INTO connection_query_all_tab (p) VALUES (?)").with_page_size(7);
         for v in &values {
-            insert_futures.push(connection.query_single_page(insert_query.clone(), (v,)));
+            insert_futures.push(connection.query_single_page(insert_query.clone(), (v,), None));
         }
 
         futures::future::try_join_all(insert_futures).await.unwrap();
 
         let mut results: Vec<i32> = connection
-            .query_all(&select_query, &[])
+            .query_all(&select_query, &[], None)
             .await
             .unwrap()
             .rows
@@ -1633,7 +1861,7 @@ mod tests {
         assert_eq!(results, values);
 
         let mut results2: Vec<i32> = connection
-            .execute_all(&prepared_select, &[])
+            .execute_all(&prepared_select, &[], None)
             .await
             .unwrap()
             .rows
@@ -1645,19 +1873,22 @@ mod tests {
         assert_eq!(results2, values);
 
         // 3. INSERT query_all should have None in result rows.
-        let insert_res1 = connection.query_all(&insert_query, (0,)).await.unwrap();
+        let insert_res1 = connection
+            .query_all(&insert_query, (0,), None)
+            .await
+            .unwrap();
         assert!(insert_res1.rows.is_none());
 
         let prepared_insert = connection.prepare(&insert_query).await.unwrap();
         let insert_res2 = connection
-            .execute_all(&prepared_insert, (0,))
+            .execute_all(&prepared_insert, (0,), None)
             .await
             .unwrap();
         assert!(insert_res2.rows.is_none(),);
 
         // 4. Calling query_all with a Query that doesn't have page_size set should result in an error.
         let no_page_size_query = Query::new("SELECT p FROM connection_query_all_tab");
-        let no_page_res = connection.query_all(&no_page_size_query, &[]).await;
+        let no_page_res = connection.query_all(&no_page_size_query, &[], None).await;
         assert!(matches!(
             no_page_res,
             Err(QueryError::BadQuery(BadQuery::Other(_)))
@@ -1665,7 +1896,7 @@ mod tests {
 
         let prepared_no_page_size_query = connection.prepare(&no_page_size_query).await.unwrap();
         let prepared_no_page_res = connection
-            .execute_all(&prepared_no_page_size_query, &[])
+            .execute_all(&prepared_no_page_size_query, &[], None)
             .await;
         assert!(matches!(
             prepared_no_page_res,
