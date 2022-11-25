@@ -1,3 +1,4 @@
+pub mod row;
 pub mod value;
 
 use bytes::Bytes;

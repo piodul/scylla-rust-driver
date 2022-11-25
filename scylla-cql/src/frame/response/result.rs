@@ -3,7 +3,7 @@ use crate::frame::response::event::SchemaChangeEvent;
 use crate::frame::types::vint_decode;
 use crate::frame::value::{Counter, CqlDuration};
 use crate::frame::{frame_errors::ParseError, types};
-use crate::types::deserialize::value::FromCql;
+use crate::types::deserialize::row;
 use crate::types::deserialize::RowsIterator;
 use bigdecimal::BigDecimal;
 use byteorder::{BigEndian, ReadBytesExt};
@@ -855,13 +855,8 @@ fn deser_rows(buf_bytes: Bytes) -> StdResult<Rows, ParseError> {
 
     let mut iter = RowsIterator::new(buf, &metadata.col_specs, rows_count, &buf_bytes);
     let mut rows = Vec::with_capacity(rows_count);
-    while let Some(mut row_iter) = iter.next().transpose()? {
-        let mut columns = Vec::with_capacity(metadata.col_specs.len());
-        while let Some(value) = row_iter.next().transpose()? {
-            <Option<CqlValue> as FromCql<'_>>::type_check(value.typ())?;
-            let v = <Option<CqlValue> as FromCql<'_>>::deserialize(value)?;
-            columns.push(v);
-        }
+    while let Some(row_iter) = iter.next().transpose()? {
+        let columns = <Vec<Option<CqlValue>> as row::FromRow<'_>>::deserialize(row_iter)?;
         rows.push(Row { columns });
     }
     Ok(Rows {
