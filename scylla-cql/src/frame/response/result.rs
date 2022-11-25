@@ -338,7 +338,6 @@ pub struct ColumnSpec {
 
 #[derive(Debug, Default)]
 pub struct ResultMetadata {
-    col_count: usize,
     pub paging_state: Option<Bytes>,
     pub col_specs: Vec<ColumnSpec>,
 }
@@ -505,8 +504,14 @@ fn deser_result_metadata(buf: &mut &[u8]) -> StdResult<ResultMetadata, ParseErro
     };
 
     if no_metadata {
+        if col_count > 0 {
+            // Currently, we always require metadata when sending a query
+            // that might return rows
+            return Err(ParseError::BadIncomingData(
+                "Expected metadata to be returned in response".to_owned(),
+            ));
+        }
         return Ok(ResultMetadata {
-            col_count,
             paging_state,
             col_specs: vec![],
         });
@@ -521,7 +526,6 @@ fn deser_result_metadata(buf: &mut &[u8]) -> StdResult<ResultMetadata, ParseErro
     let col_specs = deser_col_specs(buf, &global_table_spec, col_count)?;
 
     Ok(ResultMetadata {
-        col_count,
         paging_state,
         col_specs,
     })
@@ -840,16 +844,15 @@ fn deser_rows(buf: &mut &[u8]) -> StdResult<Rows, ParseError> {
     // the driver) where the column metadata is not sent with the result.
     // Implement this optimization. We'll then need to take the column types by a parameter.
     // Beware of races; our column types may be outdated.
-    assert!(metadata.col_count == metadata.col_specs.len());
 
     let rows_count: usize = types::read_int(buf)?.try_into()?;
 
     let mut rows = Vec::with_capacity(rows_count);
     for _ in 0..rows_count {
-        let mut columns = Vec::with_capacity(metadata.col_count);
-        for i in 0..metadata.col_count {
+        let mut columns = Vec::with_capacity(metadata.col_specs.len());
+        for spec in &metadata.col_specs {
             let v = if let Some(mut b) = types::read_bytes_opt(buf)? {
-                Some(deser_cql_value(&metadata.col_specs[i].typ, &mut b)?)
+                Some(deser_cql_value(&spec.typ, &mut b)?)
             } else {
                 None
             };
