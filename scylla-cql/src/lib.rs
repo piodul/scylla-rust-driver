@@ -1,5 +1,6 @@
 pub mod errors;
 pub mod frame;
+pub mod types;
 #[macro_use]
 pub mod macros;
 
