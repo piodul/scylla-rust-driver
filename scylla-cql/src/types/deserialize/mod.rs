@@ -1,3 +1,5 @@
+pub mod value;
+
 use bytes::Bytes;
 
 use crate::frame::frame_errors::ParseError;
