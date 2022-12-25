@@ -1,4 +1,3 @@
-use crate::cql_to_rust::FromCqlVal;
 use crate::frame::frame_errors::ParseError;
 use crate::frame::response::result::{deser_cql_value, ColumnType, CqlValue};
 
@@ -17,12 +16,7 @@ where
     fn deserialize(v: RawValue<'rows>) -> Result<Self, ParseError>;
 }
 
-// Temporary impl, for migration purposes
-// Will be replaced by an impl FromCql for CqlValue
-impl<'rows, T> FromCql<'rows> for T
-where
-    T: FromCqlVal<CqlValue> + 'rows,
-{
+impl<'rows> FromCql<'rows> for CqlValue {
     fn type_check(_typ: &ColumnType) -> Result<(), ParseError> {
         // Type checking is done in deserialize
         Ok(())
@@ -31,8 +25,7 @@ where
     fn deserialize(v: RawValue<'rows>) -> Result<Self, ParseError> {
         let mut val = ensure_not_null(v.value)?;
         let cql = deser_cql_value(v.typ, &mut val)?;
-        T::from_cql(cql)
-            .map_err(|_| ParseError::BadIncomingData("I don't know what to put here".to_owned()))
+        Ok(cql)
     }
 }
 
