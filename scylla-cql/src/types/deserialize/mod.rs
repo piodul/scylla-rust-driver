@@ -109,6 +109,7 @@ impl<'rows> Iterator for ValueIterator<'rows> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct RawValue<'rows> {
     typ: &'rows ColumnType,
     value: Option<&'rows [u8]>,
@@ -116,6 +117,18 @@ pub struct RawValue<'rows> {
 }
 
 impl<'rows> RawValue<'rows> {
+    pub fn new(
+        typ: &'rows ColumnType,
+        value: Option<&'rows [u8]>,
+        original_bytes: &'rows Bytes,
+    ) -> Self {
+        Self {
+            typ,
+            value,
+            original_bytes,
+        }
+    }
+
     pub fn typ(&self) -> &'rows ColumnType {
         self.typ
     }
@@ -126,6 +139,10 @@ impl<'rows> RawValue<'rows> {
 
     pub fn value_owned(&self) -> Option<bytes::Bytes> {
         self.value.map(|v| self.original_bytes.slice_ref(v))
+    }
+
+    pub fn original_bytes(&self) -> &'rows bytes::Bytes {
+        self.original_bytes
     }
 }
 
