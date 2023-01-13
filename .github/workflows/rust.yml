@@ -48,11 +48,11 @@ jobs:
     - name: Print Rust version
       run: rustc --version
     - name: MSRV cargo check with features
-      run: cargo check --verbose --examples --tests
+      run: cargo check -vv --examples --tests
     - name: MSRV cargo check without features
-      run: cargo check --verbose --manifest-path "scylla/Cargo.toml"
+      run: cargo check -vv --manifest-path "scylla/Cargo.toml"
     - name: MSRV cargo check scylla-cql
-      run: cargo check --verbose --all-targets --manifest-path "scylla-cql/Cargo.toml"
+      run: cargo check -vv --all-targets --manifest-path "scylla-cql/Cargo.toml"
 
   # Tests that docstrings generate docs without warnings
   cargo_docs:
