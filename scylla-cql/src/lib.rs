@@ -19,5 +19,7 @@ pub mod _macro_internal {
     pub use crate::frame::value::{
         SerializedResult, SerializedValues, Value, ValueList, ValueTooBig,
     };
+    pub use crate::frame;
     pub use crate::macros::*;
+    pub use crate::types;
 }
