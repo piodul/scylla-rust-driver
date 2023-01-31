@@ -923,6 +923,7 @@ mod tests {
     use bytes::{BufMut, Bytes, BytesMut};
     use chrono::{DateTime, Duration, NaiveDate, Utc};
     use num_bigint::BigInt;
+    use scylla_macros::{DeserializeCql, FromUserType};
     use uuid::Uuid;
 
     use crate::frame::response::cql_to_rust::FromCqlVal;
@@ -1133,6 +1134,201 @@ mod tests {
 
         let tup = deserialize::<(i32, &str, Option<Uuid>)>(&typ, &tuple).unwrap();
         assert_eq!(tup, (42, "foo", None));
+    }
+
+    #[test]
+    fn test_udt_loose_ordering() {
+        #[derive(DeserializeCql, PartialEq, Eq, Debug)]
+        #[scylla(crate = "crate")]
+        struct Udt<'a> {
+            a: &'a str,
+            #[scylla(skip)]
+            x: String,
+            #[scylla(default_when_missing)]
+            b: Option<i32>,
+        }
+
+        // Columns in correct same order
+        let mut udt_contents = BytesMut::new();
+        append_cell(&mut udt_contents, "The quick brown fox".as_bytes());
+        append_cell(&mut udt_contents, &42i32.to_be_bytes());
+        let udt = make_cell(&udt_contents);
+        let typ = ColumnType::UserDefinedType {
+            type_name: "udt".to_owned(),
+            keyspace: "ks".to_owned(),
+            field_types: vec![
+                ("a".to_owned(), ColumnType::Text),
+                ("b".to_owned(), ColumnType::Int),
+            ],
+        };
+
+        let udt = deserialize::<Udt<'_>>(&typ, &udt).unwrap();
+        assert_eq!(
+            udt,
+            Udt {
+                a: "The quick brown fox",
+                x: String::new(),
+                b: Some(42),
+            }
+        );
+
+        // The last column is missing in serialized form - it should treat
+        // as if there were null at the end
+        let mut udt_contents = BytesMut::new();
+        append_cell(&mut udt_contents, "The quick brown fox".as_bytes());
+        let udt = make_cell(&udt_contents);
+
+        let udt = deserialize::<Udt<'_>>(&typ, &udt).unwrap();
+        assert_eq!(
+            udt,
+            Udt {
+                a: "The quick brown fox",
+                x: String::new(),
+                b: None,
+            }
+        );
+
+        // Columns switched - should still work
+        let mut udt_contents = BytesMut::new();
+        append_cell(&mut udt_contents, &42i32.to_be_bytes());
+        append_cell(&mut udt_contents, "The quick brown fox".as_bytes());
+        let udt = make_cell(&udt_contents);
+        let typ = ColumnType::UserDefinedType {
+            type_name: "udt".to_owned(),
+            keyspace: "ks".to_owned(),
+            field_types: vec![
+                ("b".to_owned(), ColumnType::Int),
+                ("a".to_owned(), ColumnType::Text),
+            ],
+        };
+
+        let udt = deserialize::<Udt<'_>>(&typ, &udt).unwrap();
+        assert_eq!(
+            udt,
+            Udt {
+                a: "The quick brown fox",
+                x: String::new(),
+                b: Some(42),
+            }
+        );
+
+        // Only column 'a' is present
+        let mut udt_contents = BytesMut::new();
+        append_cell(&mut udt_contents, "The quick brown fox".as_bytes());
+        let udt = make_cell(&udt_contents);
+        let typ = ColumnType::UserDefinedType {
+            type_name: "udt".to_owned(),
+            keyspace: "ks".to_owned(),
+            field_types: vec![("a".to_owned(), ColumnType::Text)],
+        };
+
+        let udt = deserialize::<Udt<'_>>(&typ, &udt).unwrap();
+        assert_eq!(
+            udt,
+            Udt {
+                a: "The quick brown fox",
+                x: String::new(),
+                b: None,
+            }
+        );
+
+        // Wrong column type
+        let typ = ColumnType::UserDefinedType {
+            type_name: "udt".to_owned(),
+            keyspace: "ks".to_owned(),
+            field_types: vec![("a".to_owned(), ColumnType::Int)],
+        };
+        Udt::type_check(&typ).unwrap_err();
+
+        // Missing required column
+        let typ = ColumnType::UserDefinedType {
+            type_name: "udt".to_owned(),
+            keyspace: "ks".to_owned(),
+            field_types: vec![("b".to_owned(), ColumnType::Int)],
+        };
+        Udt::type_check(&typ).unwrap_err();
+    }
+
+    #[test]
+    fn test_udt_strict_ordering() {
+        #[derive(DeserializeCql, PartialEq, Eq, Debug)]
+        #[scylla(crate = "crate", enforce_order)]
+        struct Udt<'a> {
+            a: &'a str,
+            #[scylla(skip)]
+            x: String,
+            b: Option<i32>,
+        }
+
+        // Columns in correct same order
+        let mut udt_contents = BytesMut::new();
+        append_cell(&mut udt_contents, "The quick brown fox".as_bytes());
+        append_cell(&mut udt_contents, &42i32.to_be_bytes());
+        let udt = make_cell(&udt_contents);
+        let typ = ColumnType::UserDefinedType {
+            type_name: "udt".to_owned(),
+            keyspace: "ks".to_owned(),
+            field_types: vec![
+                ("a".to_owned(), ColumnType::Text),
+                ("b".to_owned(), ColumnType::Int),
+            ],
+        };
+
+        let udt = deserialize::<Udt<'_>>(&typ, &udt).unwrap();
+        assert_eq!(
+            udt,
+            Udt {
+                a: "The quick brown fox",
+                x: String::new(),
+                b: Some(42),
+            }
+        );
+
+        // The last column is missing in serialized form - it should treat
+        // as if there were null at the end
+        let mut udt_contents = BytesMut::new();
+        append_cell(&mut udt_contents, "The quick brown fox".as_bytes());
+        let udt = make_cell(&udt_contents);
+
+        let udt = deserialize::<Udt<'_>>(&typ, &udt).unwrap();
+        assert_eq!(
+            udt,
+            Udt {
+                a: "The quick brown fox",
+                x: String::new(),
+                b: None,
+            }
+        );
+
+        // Columns switched - will not work
+        let typ = ColumnType::UserDefinedType {
+            type_name: "udt".to_owned(),
+            keyspace: "ks".to_owned(),
+            field_types: vec![
+                ("b".to_owned(), ColumnType::Int),
+                ("a".to_owned(), ColumnType::Text),
+            ],
+        };
+        Udt::type_check(&typ).unwrap_err();
+
+        // Wrong column type
+        let typ = ColumnType::UserDefinedType {
+            type_name: "udt".to_owned(),
+            keyspace: "ks".to_owned(),
+            field_types: vec![
+                ("a".to_owned(), ColumnType::Int),
+                ("b".to_owned(), ColumnType::Int),
+            ],
+        };
+        Udt::type_check(&typ).unwrap_err();
+
+        // Missing required column
+        let typ = ColumnType::UserDefinedType {
+            type_name: "udt".to_owned(),
+            keyspace: "ks".to_owned(),
+            field_types: vec![("b".to_owned(), ColumnType::Int)],
+        };
+        Udt::type_check(&typ).unwrap_err();
     }
 
     #[test]
@@ -1369,6 +1565,36 @@ mod tests {
         append_cell(&mut tup, &uuid1.to_u128_le().to_be_bytes());
         let tup = make_cell(&tup);
         compat_check::<(String, i32, Uuid)>(&tup_type, tup);
+
+        // UDTs
+        #[derive(DeserializeCql, FromUserType, Debug, PartialEq, Eq)]
+        #[scylla_crate = "crate"]
+        #[scylla(crate = "crate")]
+        struct Udt {
+            a: String,
+            b: Option<i32>,
+        }
+
+        let udt_type = ColumnType::UserDefinedType {
+            type_name: "udt".to_string(),
+            keyspace: "ks".to_string(),
+            field_types: vec![
+                ("a".to_string(), ColumnType::Text),
+                ("b".to_string(), ColumnType::Int),
+            ],
+        };
+
+        let mut udt = BytesMut::new();
+        append_cell(&mut udt, "quick brown fox".as_bytes());
+        append_cell(&mut udt, &123i32.to_be_bytes());
+        let udt = make_cell(&udt);
+        compat_check::<Udt>(&udt_type, udt);
+
+        // One column missing
+        let mut udt = BytesMut::new();
+        append_cell(&mut udt, "quick brown fox".as_bytes());
+        let udt = make_cell(&udt);
+        compat_check::<Udt>(&udt_type, udt);
     }
 
     // Checks that both new and old serialization framework
