@@ -13,6 +13,12 @@ pub use scylla_macros::IntoUserType;
 /// #[derive(ValueList)] allows to pass struct as a list of values for a query
 pub use scylla_macros::ValueList;
 
+/// TODO: Documentation
+pub use scylla_macros::DeserializeCql;
+
+/// TODO: Documentation
+pub use scylla_macros::DeserializeRow;
+
 // Reexports for derive(IntoUserType)
 pub use bytes::{BufMut, Bytes, BytesMut};
 
