@@ -34,6 +34,7 @@ use super::connection::SslConfig;
 use super::errors::{BadQuery, NewSessionError, QueryError};
 use super::execution_profile::{ExecutionProfile, ExecutionProfileHandle, ExecutionProfileInner};
 use super::partitioner::PartitionerName;
+use super::query_result::MaybeFirstRowTypedError;
 use super::topology::UntranslatedPeer;
 use crate::cql_to_rust::FromRow;
 use crate::frame::response::cql_to_rust::FromRowError;
@@ -1305,30 +1306,26 @@ impl Session {
         )?;
 
         // Get tracing info
-        let tracing_info_row_res: Option<Result<TracingInfo, _>> = traces_session_res
-            .rows
-            .ok_or(QueryError::ProtocolError(
-                "Response to system_traces.sessions query was not Rows",
-            ))?
-            .into_typed::<TracingInfo>()
-            .next();
-
-        let mut tracing_info: TracingInfo = match tracing_info_row_res {
-            Some(tracing_info_row_res) => tracing_info_row_res.map_err(|_| {
-                QueryError::ProtocolError(
+        let maybe_tracing_info: Option<TracingInfo> = traces_session_res
+            .maybe_first_row_typed()
+            .map_err(|err| match err {
+                MaybeFirstRowTypedError::RowsExpected(_) => QueryError::ProtocolError(
+                    "Response to system_traces.sessions query was not Rows",
+                ),
+                MaybeFirstRowTypedError::FromRowError(_) => QueryError::ProtocolError(
                     "Columns from system_traces.session have an unexpected type",
-                )
-            })?,
+                ),
+            })?;
+
+        let mut tracing_info = match maybe_tracing_info {
             None => return Ok(None),
+            Some(tracing_info) => tracing_info,
         };
 
         // Get tracing events
-        let tracing_event_rows = traces_events_res
-            .rows
-            .ok_or(QueryError::ProtocolError(
-                "Response to system_traces.events query was not Rows",
-            ))?
-            .into_typed::<TracingEvent>();
+        let tracing_event_rows = traces_events_res.rows_typed().map_err(|_| {
+            QueryError::ProtocolError("Response to system_traces.events query was not Rows")
+        })?;
 
         for event in tracing_event_rows {
             let tracing_event: TracingEvent = event.map_err(|_| {
