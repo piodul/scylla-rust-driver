@@ -32,7 +32,7 @@ use std::{
 };
 
 use super::errors::{BadKeyspaceName, DbError, QueryError};
-use super::iterator::RowIterator;
+use super::iterator::LegacyRowIterator;
 use super::legacy_query_result::SingleRowTypedError;
 use super::query_result::QueryResult;
 use super::session::AddressTranslator;
@@ -582,7 +582,7 @@ impl Connection {
         self: Arc<Self>,
         query: Query,
         values: impl ValueList,
-    ) -> Result<RowIterator, QueryError> {
+    ) -> Result<LegacyRowIterator, QueryError> {
         let serialized_values = values.serialized()?.into_owned();
 
         let consistency = query
@@ -590,7 +590,7 @@ impl Connection {
             .determine_consistency(self.config.default_consistency);
         let serial_consistency = query.config.serial_consistency.flatten();
 
-        RowIterator::new_for_connection_query_iter(
+        LegacyRowIterator::new_for_connection_query_iter(
             query,
             self,
             serialized_values,
