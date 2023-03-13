@@ -34,6 +34,7 @@ use std::{
 use super::errors::{BadKeyspaceName, DbError, QueryError};
 use super::iterator::RowIterator;
 use super::legacy_query_result::SingleRowTypedError;
+use super::query_result::QueryResult;
 use super::session::AddressTranslator;
 use super::topology::{PeerEndpoint, UntranslatedEndpoint, UntranslatedPeer};
 use super::NodeAddr;
@@ -171,7 +172,7 @@ impl QueryResponse {
         })
     }
 
-    pub fn into_query_result(self) -> Result<LegacyQueryResult, QueryError> {
+    pub fn into_query_result(self) -> Result<QueryResult, QueryError> {
         self.into_non_error_query_response()?.into_query_result()
     }
 }
@@ -191,14 +192,10 @@ impl NonErrorQueryResponse {
         }
     }
 
-    pub fn into_query_result(self) -> Result<LegacyQueryResult, QueryError> {
-        let (rows, paging_state, col_specs) = match self.response {
-            NonErrorResponse::Result(result::Result::Rows(rs)) => (
-                Some(rs.rows),
-                rs.metadata.paging_state,
-                rs.metadata.col_specs,
-            ),
-            NonErrorResponse::Result(_) => (None, None, vec![]),
+    pub fn into_query_result(self) -> Result<QueryResult, QueryError> {
+        let raw_rows = match self.response {
+            NonErrorResponse::Result(result::Result::Rows(rs)) => Some(rs),
+            NonErrorResponse::Result(_) => None,
             _ => {
                 return Err(QueryError::ProtocolError(
                     "Unexpected server response, expected Result or Error",
@@ -206,13 +203,7 @@ impl NonErrorQueryResponse {
             }
         };
 
-        Ok(LegacyQueryResult {
-            rows,
-            warnings: self.warnings,
-            tracing_id: self.tracing_id,
-            paging_state,
-            col_specs,
-        })
+        Ok(QueryResult::new(raw_rows, self.tracing_id, self.warnings))
     }
 }
 #[cfg(feature = "ssl")]
@@ -491,9 +482,11 @@ impl Connection {
         serial_consistency: Option<SerialConsistency>,
     ) -> Result<LegacyQueryResult, QueryError> {
         let query: Query = query.into();
-        self.query_with_consistency(&query, &values, consistency, serial_consistency, None)
+        Ok(self
+            .query_with_consistency(&query, &values, consistency, serial_consistency, None)
             .await?
-            .into_query_result()
+            .into_query_result()?
+            .into_legacy_result()?)
     }
 
     pub async fn query(
@@ -612,7 +605,7 @@ impl Connection {
         &self,
         batch: &Batch,
         values: impl BatchValues,
-    ) -> Result<LegacyQueryResult, QueryError> {
+    ) -> Result<QueryResult, QueryError> {
         self.batch_with_consistency(
             batch,
             values,
@@ -630,7 +623,7 @@ impl Connection {
         values: impl BatchValues,
         consistency: Consistency,
         serial_consistency: Option<SerialConsistency>,
-    ) -> Result<LegacyQueryResult, QueryError> {
+    ) -> Result<QueryResult, QueryError> {
         let statements_iter = batch.statements.iter().map(|s| match s {
             BatchStatement::Query(q) => batch::BatchStatement::Query { text: &q.contents },
             BatchStatement::PreparedStatement(s) => {
