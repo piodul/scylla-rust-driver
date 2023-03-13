@@ -33,7 +33,7 @@ use super::connection::QueryResponse;
 use super::connection::SslConfig;
 use super::errors::{BadQuery, NewSessionError, QueryError};
 use super::execution_profile::{ExecutionProfile, ExecutionProfileHandle, ExecutionProfileInner};
-use super::legacy_query_result::MaybeFirstRowTypedError;
+use super::legacy_query_result::{LegacyQueryResult, MaybeFirstRowTypedError};
 use super::partitioner::PartitionerName;
 use super::topology::UntranslatedPeer;
 use crate::cql_to_rust::FromRow;
@@ -51,8 +51,7 @@ use crate::transport::cluster::{Cluster, ClusterData, ClusterNeatDebug};
 use crate::transport::connection::{Connection, ConnectionConfig, VerifiedKeyspaceName};
 use crate::transport::connection_pool::PoolConfig;
 use crate::transport::host_filter::HostFilter;
-use crate::transport::iterator::{PreparedIteratorConfig, RowIterator};
-use crate::transport::legacy_query_result::LegacyQueryResult;
+use crate::transport::iterator::{LegacyRowIterator, PreparedIteratorConfig};
 use crate::transport::load_balancing::{LoadBalancingPolicy, Statement, TokenAwarePolicy};
 use crate::transport::metrics::Metrics;
 use crate::transport::node::Node;
@@ -702,7 +701,7 @@ impl Session {
         &self,
         query: impl Into<Query>,
         values: impl ValueList,
-    ) -> Result<RowIterator, QueryError> {
+    ) -> Result<LegacyRowIterator, QueryError> {
         let query: Query = query.into();
         let serialized_values = values.serialized()?;
 
@@ -712,7 +711,7 @@ impl Session {
             .access();
 
         let span = trace_span!("Request", query = query.contents.as_str());
-        RowIterator::new_for_query(
+        LegacyRowIterator::new_for_query(
             query,
             serialized_values.into_owned(),
             execution_profile,
@@ -989,7 +988,7 @@ impl Session {
         &self,
         prepared: impl Into<PreparedStatement>,
         values: impl ValueList,
-    ) -> Result<RowIterator, QueryError> {
+    ) -> Result<LegacyRowIterator, QueryError> {
         let prepared = prepared.into();
         let serialized_values = values.serialized()?;
 
@@ -1004,7 +1003,7 @@ impl Session {
             "Request",
             prepared_id = format!("{:X}", prepared.get_id()).as_str()
         );
-        RowIterator::new_for_prepared_statement(PreparedIteratorConfig {
+        LegacyRowIterator::new_for_prepared_statement(PreparedIteratorConfig {
             prepared,
             values: serialized_values.into_owned(),
             token,
