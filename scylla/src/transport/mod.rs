@@ -8,6 +8,7 @@ pub mod host_filter;
 pub mod iterator;
 pub mod load_balancing;
 pub(crate) mod metrics;
+pub mod query_result;
 mod node;
 pub mod partitioner;
 pub mod legacy_query_result;
