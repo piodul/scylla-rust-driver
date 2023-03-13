@@ -33,8 +33,8 @@ use super::connection::QueryResponse;
 use super::connection::SslConfig;
 use super::errors::{BadQuery, NewSessionError, QueryError};
 use super::execution_profile::{ExecutionProfile, ExecutionProfileHandle, ExecutionProfileInner};
-use super::partitioner::PartitionerName;
 use super::legacy_query_result::MaybeFirstRowTypedError;
+use super::partitioner::PartitionerName;
 use super::topology::UntranslatedPeer;
 use crate::cql_to_rust::FromRow;
 use crate::frame::response::cql_to_rust::FromRowError;
@@ -52,10 +52,11 @@ use crate::transport::connection::{Connection, ConnectionConfig, VerifiedKeyspac
 use crate::transport::connection_pool::PoolConfig;
 use crate::transport::host_filter::HostFilter;
 use crate::transport::iterator::{PreparedIteratorConfig, RowIterator};
+use crate::transport::legacy_query_result::LegacyQueryResult;
 use crate::transport::load_balancing::{LoadBalancingPolicy, Statement, TokenAwarePolicy};
 use crate::transport::metrics::Metrics;
 use crate::transport::node::Node;
-use crate::transport::legacy_query_result::LegacyQueryResult;
+use crate::transport::query_result::QueryResult;
 use crate::transport::retry_policy::{QueryInfo, RetryDecision, RetrySession};
 use crate::transport::speculative_execution;
 use crate::transport::Compression;
@@ -617,7 +618,7 @@ impl Session {
         self.handle_auto_await_schema_agreement(&query.contents, &response)
             .await?;
 
-        response.into_query_result()
+        Ok(response.into_query_result()?.into_legacy_result()?)
     }
 
     async fn handle_set_keyspace_response(
@@ -940,7 +941,7 @@ impl Session {
         self.handle_auto_await_schema_agreement(prepared.get_statement(), &response)
             .await?;
 
-        response.into_query_result()
+        Ok(response.into_query_result()?.into_legacy_result()?)
     }
 
     /// Run a prepared query with paging\
@@ -1119,7 +1120,7 @@ impl Session {
 
         Ok(match run_query_result {
             RunQueryResult::IgnoredWriteError => LegacyQueryResult::default(),
-            RunQueryResult::Completed(response) => response,
+            RunQueryResult::Completed(response) => response.into_legacy_result()?,
         })
     }
 
@@ -1814,7 +1815,7 @@ pub(crate) async fn resolve_hostname(hostname: &str) -> Result<SocketAddr, NewSe
 pub trait AllowedRunQueryResTType {}
 
 impl AllowedRunQueryResTType for Uuid {}
-impl AllowedRunQueryResTType for LegacyQueryResult {}
+impl AllowedRunQueryResTType for QueryResult {}
 impl AllowedRunQueryResTType for NonErrorQueryResponse {}
 
 struct ExecuteQueryContext<'a> {

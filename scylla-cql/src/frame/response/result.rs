@@ -493,7 +493,7 @@ pub struct Rows {
 #[derive(Debug)]
 pub enum Result {
     Void,
-    Rows(Rows),
+    Rows(RawRows),
     SetKeyspace(SetKeyspace),
     Prepared(Prepared),
     SchemaChange(SchemaChange),
@@ -943,7 +943,7 @@ pub fn deser_cql_value(typ: &ColumnType, buf: &mut &[u8]) -> StdResult<CqlValue,
     })
 }
 
-fn deser_rows(buf_bytes: Bytes) -> StdResult<Rows, ParseError> {
+fn deser_rows(buf_bytes: Bytes) -> StdResult<RawRows, ParseError> {
     let buf = &mut &*buf_bytes;
     let metadata = deser_result_metadata(buf)?;
 
@@ -955,23 +955,10 @@ fn deser_rows(buf_bytes: Bytes) -> StdResult<Rows, ParseError> {
 
     let rows_count: usize = types::read_int(buf)?.try_into()?;
 
-    let mut rows = Vec::with_capacity(rows_count);
-    for _ in 0..rows_count {
-        let mut columns = Vec::with_capacity(metadata.col_count);
-        for i in 0..metadata.col_count {
-            let v = if let Some(mut b) = types::read_bytes_opt(buf)? {
-                Some(deser_cql_value(&metadata.col_specs[i].typ, &mut b)?)
-            } else {
-                None
-            };
-            columns.push(v);
-        }
-        rows.push(Row { columns });
-    }
-    Ok(Rows {
+    Ok(RawRows {
         metadata,
         rows_count,
-        rows,
+        raw_rows: buf_bytes.slice_ref(buf),
     })
 }
 

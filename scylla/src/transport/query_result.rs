@@ -13,9 +13,10 @@ use super::legacy_query_result::LegacyQueryResult;
 /// More comprehensive description TODO
 #[derive(Default, Debug)]
 pub struct QueryResult {
-    raw_rows: Option<RawRows>,
-    tracing_id: Option<Uuid>,
-    warnings: Vec<String>,
+    // TODO: Add constructor to initialize those fields
+    pub(crate) raw_rows: Option<RawRows>,
+    pub(crate) tracing_id: Option<Uuid>,
+    pub(crate) warnings: Vec<String>,
 }
 
 impl QueryResult {
