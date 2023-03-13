@@ -16,6 +16,7 @@ use futures::future::try_join_all;
 use scylla_cql::errors::DbError;
 pub use scylla_cql::errors::TranslationError;
 use scylla_cql::frame::response::NonErrorResponse;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -446,7 +447,7 @@ impl GenericSession<LegacyDeserializationApi> {
         query: impl Into<Query>,
         values: impl ValueList,
     ) -> Result<LegacyQueryResult, QueryError> {
-        self.do_query(query, values).await
+        self.do_query(query.into(), values.serialized()?).await
     }
 
     /// Queries the database with a custom paging state.
@@ -461,7 +462,8 @@ impl GenericSession<LegacyDeserializationApi> {
         values: impl ValueList,
         paging_state: Option<Bytes>,
     ) -> Result<LegacyQueryResult, QueryError> {
-        self.do_query_paged(query, values, paging_state).await
+        self.do_query_paged(query.into(), values.serialized()?, paging_state)
+            .await
     }
 
     /// Run a simple query with paging\
@@ -502,7 +504,7 @@ impl GenericSession<LegacyDeserializationApi> {
         query: impl Into<Query>,
         values: impl ValueList,
     ) -> Result<LegacyRowIterator, QueryError> {
-        self.do_query_iter(query, values).await
+        self.do_query_iter(query.into(), values.serialized()?).await
     }
 
     /// Execute a prepared query. Requires a [PreparedStatement](crate::prepared_statement::PreparedStatement)
@@ -547,7 +549,7 @@ impl GenericSession<LegacyDeserializationApi> {
         prepared: &PreparedStatement,
         values: impl ValueList,
     ) -> Result<LegacyQueryResult, QueryError> {
-        self.do_execute(prepared, values).await
+        self.do_execute(prepared, values.serialized()?).await
     }
 
     /// Executes a previously prepared statement with previously received paging state
@@ -562,7 +564,8 @@ impl GenericSession<LegacyDeserializationApi> {
         values: impl ValueList,
         paging_state: Option<Bytes>,
     ) -> Result<LegacyQueryResult, QueryError> {
-        self.do_execute_paged(prepared, values, paging_state).await
+        self.do_execute_paged(prepared, values.serialized()?, paging_state)
+            .await
     }
 
     /// Run a prepared query with paging\
@@ -611,7 +614,8 @@ impl GenericSession<LegacyDeserializationApi> {
         prepared: impl Into<PreparedStatement>,
         values: impl ValueList,
     ) -> Result<LegacyRowIterator, QueryError> {
-        self.do_execute_iter(prepared, values).await
+        self.do_execute_iter(prepared.into(), values.serialized()?)
+            .await
     }
 
     /// Perform a batch query\
@@ -802,21 +806,18 @@ where
 
     async fn do_query(
         &self,
-        query: impl Into<Query>,
-        values: impl ValueList,
+        query: Query,
+        values: Cow<'_, SerializedValues>,
     ) -> Result<LegacyQueryResult, QueryError> {
         self.do_query_paged(query, values, None).await
     }
 
     async fn do_query_paged(
         &self,
-        query: impl Into<Query>,
-        values: impl ValueList,
+        query: Query,
+        serialized_values: Cow<'_, SerializedValues>,
         paging_state: Option<Bytes>,
     ) -> Result<LegacyQueryResult, QueryError> {
-        let query: Query = query.into();
-        let serialized_values = values.serialized()?;
-
         let span = trace_span!("Request", query = query.contents.as_str());
         let run_query_result = self
             .run_query(
@@ -913,12 +914,9 @@ where
 
     async fn do_query_iter(
         &self,
-        query: impl Into<Query>,
-        values: impl ValueList,
+        query: Query,
+        serialized_values: Cow<'_, SerializedValues>,
     ) -> Result<LegacyRowIterator, QueryError> {
-        let query: Query = query.into();
-        let serialized_values = values.serialized()?;
-
         let execution_profile = query
             .get_execution_profile_handle()
             .unwrap_or_else(|| self.get_default_execution_profile_handle())
@@ -1038,7 +1036,7 @@ where
     async fn do_execute(
         &self,
         prepared: &PreparedStatement,
-        values: impl ValueList,
+        values: Cow<'_, SerializedValues>,
     ) -> Result<LegacyQueryResult, QueryError> {
         self.do_execute_paged(prepared, values, None).await
     }
@@ -1046,10 +1044,9 @@ where
     async fn do_execute_paged(
         &self,
         prepared: &PreparedStatement,
-        values: impl ValueList,
+        serialized_values: Cow<'_, SerializedValues>,
         paging_state: Option<Bytes>,
     ) -> Result<LegacyQueryResult, QueryError> {
-        let serialized_values = values.serialized()?;
         let values_ref = &serialized_values;
         let paging_state_ref = &paging_state;
 
@@ -1117,12 +1114,9 @@ where
 
     async fn do_execute_iter(
         &self,
-        prepared: impl Into<PreparedStatement>,
-        values: impl ValueList,
+        prepared: PreparedStatement,
+        serialized_values: Cow<'_, SerializedValues>,
     ) -> Result<LegacyRowIterator, QueryError> {
-        let prepared = prepared.into();
-        let serialized_values = values.serialized()?;
-
         let token = self.calculate_token(&prepared, &serialized_values)?;
 
         let execution_profile = prepared
@@ -1392,9 +1386,10 @@ where
         traces_events_query.config.consistency = consistency;
         traces_events_query.set_page_size(1024);
 
+        let serialized_tracing_id = (tracing_id,).serialized()?.into_owned();
         let (traces_session_res, traces_events_res) = tokio::try_join!(
-            self.do_query(traces_session_query, (tracing_id,)),
-            self.do_query(traces_events_query, (tracing_id,))
+            self.do_query(traces_session_query, Cow::Borrowed(&serialized_tracing_id)),
+            self.do_query(traces_events_query, Cow::Borrowed(&serialized_tracing_id))
         )?;
 
         // Get tracing info
