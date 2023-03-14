@@ -47,13 +47,13 @@ async fn main() -> Result<()> {
     let session1: Session = SessionBuilder::new()
         .known_node(&uri)
         .default_execution_profile_handle(handle1.clone())
-        .build_new_api()
+        .build()
         .await?;
 
     let session2: Session = SessionBuilder::new()
         .known_node(&uri)
         .default_execution_profile_handle(handle2.clone())
-        .build_new_api()
+        .build()
         .await?;
 
     // As default execution profile is not provided explicitly, session 3 uses a predefined one.

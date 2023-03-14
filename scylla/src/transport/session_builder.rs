@@ -467,11 +467,27 @@ impl<K: SessionBuilderKind> GenericSessionBuilder<K> {
         self
     }
 
-    // TODO: Switch to Current API and remove `build_new_api` after everything
-    // is migrated here.
+    /// Builds the Session after setting all the options.
+    ///
+    /// The new session object uses the new deserialization API. If you wish
+    /// to use the old API, use [`SessionBuilder::build_legacy`].
+    ///
+    /// # Example
+    /// ```
+    /// # use scylla::{Session, SessionBuilder};
+    /// # use scylla::transport::Compression;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let session: Session = SessionBuilder::new()
+    ///     .known_node("127.0.0.1:9042")
+    ///     .compression(Some(Compression::Snappy))
+    ///     .build() // Turns SessionBuilder into Session
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn build(
         &self,
-    ) -> Result<GenericSession<LegacyDeserializationApi>, NewSessionError> {
+    ) -> Result<GenericSession<CurrentDeserializationApi>, NewSessionError> {
         GenericSession::connect(self.config.clone()).await
     }
 
@@ -496,30 +512,6 @@ impl<K: SessionBuilderKind> GenericSessionBuilder<K> {
     pub async fn build_legacy(
         &self,
     ) -> Result<GenericSession<LegacyDeserializationApi>, NewSessionError> {
-        GenericSession::connect(self.config.clone()).await
-    }
-
-    /// Builds the Session after setting all the options.
-    ///
-    /// The new session object uses the new deserialization API. If you wish
-    /// to use the old API, use [`SessionBuilder::build_legacy`].
-    ///
-    /// # Example
-    /// ```
-    /// # use scylla::{Session, SessionBuilder};
-    /// # use scylla::transport::Compression;
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let session: Session = SessionBuilder::new()
-    ///     .known_node("127.0.0.1:9042")
-    ///     .compression(Some(Compression::Snappy))
-    ///     .build() // Turns SessionBuilder into Session
-    ///     .await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn build_new_api(
-        &self,
-    ) -> Result<GenericSession<CurrentDeserializationApi>, NewSessionError> {
         GenericSession::connect(self.config.clone()).await
     }
 

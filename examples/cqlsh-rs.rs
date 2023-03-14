@@ -205,7 +205,7 @@ async fn main() -> Result<()> {
     let session: Session = SessionBuilder::new()
         .known_node(uri)
         .compression(Some(Compression::Lz4))
-        .build_new_api()
+        .build()
         .await?;
 
     let config = Config::builder()

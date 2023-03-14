@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     let _session: Session = SessionBuilder::new()
         .known_node(uri)
         .default_execution_profile_handle(profile.into_handle())
-        .build_new_api()
+        .build()
         .await?;
 
     Ok(())

@@ -25,11 +25,7 @@ async fn init_test(table_name: &str, type_name: &str) -> Session {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
 
     println!("Connecting to {} ...", uri);
-    let session: Session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session: Session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session
@@ -730,11 +726,7 @@ async fn test_udt_after_schema_update() {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
 
     println!("Connecting to {} ...", uri);
-    let session: Session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session: Session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session

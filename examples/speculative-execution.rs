@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
     let session: Session = SessionBuilder::new()
         .known_node(uri)
         .default_execution_profile_handle(speculative_profile.into_handle())
-        .build_new_api()
+        .build()
         .await?;
 
     session.query("CREATE KEYSPACE IF NOT EXISTS ks WITH REPLICATION = {'class' : 'SimpleStrategy', 'replication_factor' : 1}", &[]).await?;

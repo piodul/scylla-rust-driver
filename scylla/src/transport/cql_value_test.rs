@@ -11,11 +11,7 @@ use crate::SessionBuilder;
 #[tokio::test]
 async fn test_cqlvalue_udt() {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session: Session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session: Session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
     session
         .query(
@@ -82,11 +78,7 @@ async fn test_cqlvalue_udt() {
 #[tokio::test]
 async fn test_cqlvalue_duration() {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session: Session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session: Session = SessionBuilder::new().known_node(uri).build().await.unwrap();
 
     let ks = unique_keyspace_name();
     session

@@ -465,7 +465,6 @@ mod tests {
         SpeculativeId, StructuredHistory, TimePoint,
     };
     use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-    use futures::StreamExt;
     use scylla_cql::{
         errors::{DbError, QueryError},
         frame::types::LegacyConsistency,

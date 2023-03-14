@@ -11,11 +11,7 @@ use std::{
 
 async fn connect() -> Session {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
     session.use_keyspace(ks, false).await.unwrap();

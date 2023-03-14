@@ -60,11 +60,7 @@ async fn test_connection_failure() {
 #[tokio::test]
 async fn test_unprepared_statement() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -163,11 +159,7 @@ async fn test_unprepared_statement() {
 #[tokio::test]
 async fn test_prepared_statement() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -363,13 +355,7 @@ async fn test_prepared_statement() {
 #[tokio::test]
 async fn test_batch() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = Arc::new(
-        SessionBuilder::new()
-            .known_node(uri)
-            .build_new_api()
-            .await
-            .unwrap(),
-    );
+    let session = Arc::new(SessionBuilder::new().known_node(uri).build().await.unwrap());
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -471,11 +457,7 @@ async fn test_batch() {
 #[tokio::test]
 async fn test_token_calculation() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -536,7 +518,7 @@ async fn test_use_keyspace() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
     let session = SessionBuilder::new()
         .known_node(&uri)
-        .build_new_api()
+        .build()
         .await
         .unwrap();
     let ks = unique_keyspace_name();
@@ -609,7 +591,7 @@ async fn test_use_keyspace() {
     let session2: Session = SessionBuilder::new()
         .known_node(uri)
         .use_keyspace(ks.clone(), false)
-        .build_new_api()
+        .build()
         .await
         .unwrap();
 
@@ -632,7 +614,7 @@ async fn test_use_keyspace_case_sensitivity() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
     let session = SessionBuilder::new()
         .known_node(&uri)
-        .build_new_api()
+        .build()
         .await
         .unwrap();
     let ks_lower = unique_keyspace_name().to_lowercase();
@@ -709,7 +691,7 @@ async fn test_raw_use_keyspace() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
     let session = SessionBuilder::new()
         .known_node(&uri)
-        .build_new_api()
+        .build()
         .await
         .unwrap();
     let ks = unique_keyspace_name();
@@ -763,11 +745,7 @@ async fn test_raw_use_keyspace() {
 #[tokio::test]
 async fn test_fetch_system_keyspace() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
 
     let prepared_statement = session
         .prepare("SELECT * FROM system_schema.keyspaces")
@@ -781,11 +759,7 @@ async fn test_fetch_system_keyspace() {
 #[tokio::test]
 async fn test_db_errors() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     // SyntaxError on bad query
@@ -840,11 +814,7 @@ async fn test_db_errors() {
 #[tokio::test]
 async fn test_tracing() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -1091,22 +1061,14 @@ async fn assert_in_tracing_table(session: &Session, tracing_uuid: Uuid) {
 #[tokio::test]
 async fn test_fetch_schema_version() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     session.fetch_schema_version().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_await_schema_agreement() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     session.await_schema_agreement().await.unwrap();
 }
 
@@ -1114,11 +1076,7 @@ async fn test_await_schema_agreement() {
 async fn test_await_timed_schema_agreement() {
     use std::time::Duration;
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     session
         .await_timed_schema_agreement(Duration::from_millis(50))
         .await
@@ -1128,11 +1086,7 @@ async fn test_await_timed_schema_agreement() {
 #[tokio::test]
 async fn test_timestamp() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -1814,11 +1768,7 @@ async fn test_turning_off_schema_fetching() {
 #[tokio::test]
 async fn test_named_bind_markers() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session
@@ -1949,11 +1899,7 @@ async fn test_unprepared_reprepare_in_execute() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2003,11 +1949,7 @@ async fn test_unusual_valuelists() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2070,11 +2012,7 @@ async fn test_unprepared_reprepare_in_batch() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2140,11 +2078,7 @@ async fn test_unprepared_reprepare_in_caching_session_execute() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2205,11 +2139,7 @@ async fn test_views_in_schema_info() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2281,11 +2211,7 @@ async fn assert_test_batch_table_rows_contain(sess: &Session, expected_rows: &[(
 #[tokio::test]
 async fn test_prepare_batch() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
 
     let ks = unique_keyspace_name();
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2383,11 +2309,7 @@ async fn test_prepare_batch() {
 #[tokio::test]
 async fn test_refresh_metadata_after_schema_agreement() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
 
     let ks = unique_keyspace_name();
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2426,11 +2348,7 @@ async fn test_refresh_metadata_after_schema_agreement() {
 #[tokio::test]
 async fn test_rate_limit_exceeded_exception() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
 
     // Typed errors in RPC were introduced along with per-partition rate limiting.
     // There is no dedicated feature for per-partition rate limiting, so we are
@@ -2479,11 +2397,7 @@ async fn test_rate_limit_exceeded_exception() {
 #[tokio::test]
 async fn test_batch_lwts() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
 
     let ks = unique_keyspace_name();
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2599,7 +2513,7 @@ async fn test_keyspaces_to_fetch() {
 
     let session_default = SessionBuilder::new()
         .known_node(&uri)
-        .build_new_api()
+        .build()
         .await
         .unwrap();
     for ks in [&ks1, &ks2] {
@@ -2621,7 +2535,7 @@ async fn test_keyspaces_to_fetch() {
     let session1 = SessionBuilder::new()
         .known_node(&uri)
         .keyspaces_to_fetch([&ks1])
-        .build_new_api()
+        .build()
         .await
         .unwrap();
     assert!(session1.get_cluster_data().keyspaces.contains_key(&ks1));
@@ -2630,7 +2544,7 @@ async fn test_keyspaces_to_fetch() {
     let session_all = SessionBuilder::new()
         .known_node(&uri)
         .keyspaces_to_fetch([] as [String; 0])
-        .build_new_api()
+        .build()
         .await
         .unwrap();
     assert!(session_all.get_cluster_data().keyspaces.contains_key(&ks1));
@@ -2677,7 +2591,7 @@ async fn test_iter_works_when_retry_policy_returns_ignore_write_error() {
     let session = SessionBuilder::new()
         .known_node(&uri)
         .default_execution_profile_handle(handle)
-        .build_new_api()
+        .build()
         .await
         .unwrap();
 
@@ -2722,11 +2636,7 @@ async fn test_iter_works_when_retry_policy_returns_ignore_write_error() {
 #[tokio::test]
 async fn test_iter_methods_with_modification_statements() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_new_api()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2767,7 +2677,7 @@ async fn test_api_migration_session_sharing() {
     {
         let session = SessionBuilder::new()
             .known_node(&uri)
-            .build_new_api()
+            .build()
             .await
             .unwrap();
         let session_shared = session.make_shared_session_with_legacy_api();

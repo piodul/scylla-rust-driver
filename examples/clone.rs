@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
 
     let sessions: Vec<Session> = join_all(
         (0..100)
-            .map(|_: usize| async { session_builder.build_new_api().await.unwrap() })
+            .map(|_: usize| async { session_builder.build().await.unwrap() })
             .collect::<Vec<_>>(),
     )
     .await;
