@@ -72,19 +72,16 @@
 //! # use scylla::Session;
 //! # use std::error::Error;
 //! # async fn check_only_compiles(session: &Session) -> Result<(), Box<dyn Error>> {
-//! use scylla::IntoTypedRows;
-//!
 //! // Read rows containing an int and text
-//! let rows_opt = session
-//! .query("SELECT a, b FROM ks.tab", &[])
-//!     .await?
-//!     .rows;
+//! let result = session
+//!     .query("SELECT a, b FROM ks.tab", &[])
+//!     .await?;
 //!
-//! if let Some(rows) = rows_opt {
-//!     for row in rows.into_typed::<(i32, String)>() {
-//!         // Parse row as int and text \
-//!         let (int_val, text_val): (i32, String) = row?;
-//!     }
+//! let iter = result.rows::<(i32, String)>()?;
+//!
+//! for row in iter {
+//!     let (i, s) = row?;
+//!     println!("{} {}", i, s);
 //! }
 //! # Ok(())
 //! # }
