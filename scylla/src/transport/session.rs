@@ -34,7 +34,7 @@ use super::connection::SslConfig;
 use super::errors::{BadQuery, NewSessionError, QueryError};
 use super::execution_profile::{ExecutionProfile, ExecutionProfileHandle, ExecutionProfileInner};
 use super::partitioner::PartitionerName;
-use super::query_result::MaybeFirstRowTypedError;
+use super::legacy_query_result::MaybeFirstRowTypedError;
 use super::topology::UntranslatedPeer;
 use crate::cql_to_rust::FromRow;
 use crate::frame::response::cql_to_rust::FromRowError;
@@ -55,7 +55,7 @@ use crate::transport::iterator::{PreparedIteratorConfig, RowIterator};
 use crate::transport::load_balancing::{LoadBalancingPolicy, Statement, TokenAwarePolicy};
 use crate::transport::metrics::Metrics;
 use crate::transport::node::Node;
-use crate::transport::query_result::QueryResult;
+use crate::transport::legacy_query_result::LegacyQueryResult;
 use crate::transport::retry_policy::{QueryInfo, RetryDecision, RetrySession};
 use crate::transport::speculative_execution;
 use crate::transport::Compression;
@@ -551,7 +551,7 @@ impl Session {
         &self,
         query: impl Into<Query>,
         values: impl ValueList,
-    ) -> Result<QueryResult, QueryError> {
+    ) -> Result<LegacyQueryResult, QueryError> {
         self.query_paged(query, values, None).await
     }
 
@@ -566,7 +566,7 @@ impl Session {
         query: impl Into<Query>,
         values: impl ValueList,
         paging_state: Option<Bytes>,
-    ) -> Result<QueryResult, QueryError> {
+    ) -> Result<LegacyQueryResult, QueryError> {
         let query: Query = query.into();
         let serialized_values = values.serialized()?;
 
@@ -861,7 +861,7 @@ impl Session {
         &self,
         prepared: &PreparedStatement,
         values: impl ValueList,
-    ) -> Result<QueryResult, QueryError> {
+    ) -> Result<LegacyQueryResult, QueryError> {
         self.execute_paged(prepared, values, None).await
     }
 
@@ -876,7 +876,7 @@ impl Session {
         prepared: &PreparedStatement,
         values: impl ValueList,
         paging_state: Option<Bytes>,
-    ) -> Result<QueryResult, QueryError> {
+    ) -> Result<LegacyQueryResult, QueryError> {
         let serialized_values = values.serialized()?;
         let values_ref = &serialized_values;
         let paging_state_ref = &paging_state;
@@ -1059,7 +1059,7 @@ impl Session {
         &self,
         batch: &Batch,
         values: impl BatchValues,
-    ) -> Result<QueryResult, QueryError> {
+    ) -> Result<LegacyQueryResult, QueryError> {
         // Shard-awareness behavior for batch will be to pick shard based on first batch statement's shard
         // If users batch statements by shard, they will be rewarded with full shard awareness
 
@@ -1118,7 +1118,7 @@ impl Session {
             .await?;
 
         Ok(match run_query_result {
-            RunQueryResult::IgnoredWriteError => QueryResult::default(),
+            RunQueryResult::IgnoredWriteError => LegacyQueryResult::default(),
             RunQueryResult::Completed(response) => response,
         })
     }
@@ -1814,7 +1814,7 @@ pub(crate) async fn resolve_hostname(hostname: &str) -> Result<SocketAddr, NewSe
 pub trait AllowedRunQueryResTType {}
 
 impl AllowedRunQueryResTType for Uuid {}
-impl AllowedRunQueryResTType for QueryResult {}
+impl AllowedRunQueryResTType for LegacyQueryResult {}
 impl AllowedRunQueryResTType for NonErrorQueryResponse {}
 
 struct ExecuteQueryContext<'a> {
