@@ -1,5 +1,6 @@
 use anyhow::Result;
-use scylla::{statement::prepared_statement::PreparedStatement, Session, SessionBuilder};
+use scylla::transport::session::NewDeserApiSession as Session;
+use scylla::{statement::prepared_statement::PreparedStatement, SessionBuilder};
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -128,7 +129,10 @@ async fn main() -> Result<()> {
 
     println!("Connecting to {} ...", args.node);
 
-    let session: Session = SessionBuilder::new().known_node(args.node).build().await?;
+    let session: Session = SessionBuilder::new()
+        .known_node(args.node)
+        .build_new_api()
+        .await?;
     let session = Arc::new(session);
 
     session.query("CREATE KEYSPACE IF NOT EXISTS ks WITH REPLICATION = {'class' : 'SimpleStrategy', 'replication_factor' : 1}", &[]).await?;

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use futures::future::join_all;
-use scylla::transport::session::Session;
+use scylla::transport::session::NewDeserApiSession as Session;
 use scylla::SessionBuilder;
 use std::env;
 
@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
 
     let sessions: Vec<Session> = join_all(
         (0..100)
-            .map(|_: usize| async { session_builder.build().await.unwrap() })
+            .map(|_: usize| async { session_builder.build_new_api().await.unwrap() })
             .collect::<Vec<_>>(),
     )
     .await;
@@ -42,7 +42,8 @@ async fn main() -> Result<()> {
     let num_rows = sessions[42]
         .query("SELECT a, b, c FROM ks.t", &[])
         .await?
-        .rows_num()?;
+        .rows_num()
+        .unwrap();
     println!("Read {} rows", num_rows);
 
     Ok(())

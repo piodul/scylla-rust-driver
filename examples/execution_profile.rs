@@ -4,7 +4,7 @@ use scylla::query::Query;
 use scylla::retry_policy::{DefaultRetryPolicy, FallthroughRetryPolicy};
 use scylla::speculative_execution::PercentileSpeculativeExecutionPolicy;
 use scylla::statement::{Consistency, SerialConsistency};
-use scylla::transport::session::Session;
+use scylla::transport::session::NewDeserApiSession as Session;
 use scylla::transport::ExecutionProfile;
 use scylla::{SessionBuilder, SessionConfig};
 use std::env;
@@ -47,13 +47,13 @@ async fn main() -> Result<()> {
     let session1: Session = SessionBuilder::new()
         .known_node(&uri)
         .default_execution_profile_handle(handle1.clone())
-        .build()
+        .build_new_api()
         .await?;
 
     let session2: Session = SessionBuilder::new()
         .known_node(&uri)
         .default_execution_profile_handle(handle2.clone())
-        .build()
+        .build_new_api()
         .await?;
 
     // As default execution profile is not provided explicitly, session 3 uses a predefined one.

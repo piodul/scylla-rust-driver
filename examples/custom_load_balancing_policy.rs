@@ -2,7 +2,7 @@ use anyhow::Result;
 use scylla::{
     load_balancing::{LoadBalancingPolicy, Statement},
     transport::{ClusterData, ExecutionProfile, Node},
-    Session, SessionBuilder,
+    NewDeserApiSession as Session, SessionBuilder,
 };
 use std::{env, sync::Arc};
 
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     let _session: Session = SessionBuilder::new()
         .known_node(uri)
         .default_execution_profile_handle(profile.into_handle())
-        .build()
+        .build_new_api()
         .await?;
 
     Ok(())

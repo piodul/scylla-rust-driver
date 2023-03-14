@@ -1,6 +1,6 @@
 use anyhow::Result;
 use scylla::macros::{FromUserType, IntoUserType};
-use scylla::{Session, SessionBuilder};
+use scylla::{NewDeserApiSession as Session, SessionBuilder};
 use std::env;
 
 #[tokio::main]
@@ -9,7 +9,10 @@ async fn main() -> Result<()> {
 
     println!("Connecting to {} ...", uri);
 
-    let session: Session = SessionBuilder::new().known_node(uri).build().await?;
+    let session: Session = SessionBuilder::new()
+        .known_node(uri)
+        .build_new_api()
+        .await?;
 
     session.query("CREATE KEYSPACE IF NOT EXISTS ks WITH REPLICATION = {'class' : 'SimpleStrategy', 'replication_factor' : 1}", &[]).await?;
 
@@ -46,7 +49,10 @@ async fn main() -> Result<()> {
         .await?;
 
     // And read like any normal value
-    let result = session.query("SELECT my FROM ks.udt_tab", &[]).await?;
+    let result = session
+        .query("SELECT my FROM ks.udt_tab", &[])
+        .await?
+        .into_legacy_result()?; // TODO: Fix after introducing macros
     let mut iter = result.rows_typed::<(MyType,)>()?;
     while let Some((my_val,)) = iter.next().transpose()? {
         println!("{:?}", my_val);
