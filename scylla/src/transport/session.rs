@@ -3,6 +3,7 @@
 
 #[cfg(feature = "cloud")]
 use crate::cloud::CloudConfig;
+use crate::LegacyQueryResult;
 
 use crate::frame::types::LegacyConsistency;
 use crate::history;
@@ -37,7 +38,8 @@ use super::connection::QueryResponse;
 use super::connection::SslConfig;
 use super::errors::{BadQuery, NewSessionError, QueryError};
 use super::execution_profile::{ExecutionProfile, ExecutionProfileHandle, ExecutionProfileInner};
-use super::legacy_query_result::{LegacyQueryResult, MaybeFirstRowTypedError};
+use super::iterator::RawIterator;
+use super::legacy_query_result::MaybeFirstRowTypedError;
 use super::partitioner::PartitionerName;
 use super::topology::UntranslatedPeer;
 use super::NodeRef;
@@ -720,7 +722,7 @@ impl Session {
             .unwrap_or_else(|| self.get_default_execution_profile_handle())
             .access();
 
-        LegacyRowIterator::new_for_query(
+        RawIterator::new_for_query(
             query,
             serialized_values.into_owned(),
             execution_profile,
@@ -728,6 +730,7 @@ impl Session {
             self.metrics.clone(),
         )
         .await
+        .map(RawIterator::into_legacy)
     }
 
     /// Prepares a statement on the server side and returns a prepared statement,
@@ -1028,7 +1031,7 @@ impl Session {
             .unwrap_or_else(|| self.get_default_execution_profile_handle())
             .access();
 
-        LegacyRowIterator::new_for_prepared_statement(PreparedIteratorConfig {
+        RawIterator::new_for_prepared_statement(PreparedIteratorConfig {
             prepared,
             values: serialized_values.into_owned(),
             partition_key,
@@ -1038,6 +1041,7 @@ impl Session {
             metrics: self.metrics.clone(),
         })
         .await
+        .map(RawIterator::into_legacy)
     }
 
     /// Perform a batch query\
