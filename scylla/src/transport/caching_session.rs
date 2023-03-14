@@ -305,22 +305,25 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::NewDeserializationCachingSession as CachingSession;
     use crate::query::Query;
     use crate::transport::partitioner::PartitionerName;
+    use crate::transport::session::NewDeserApiSession as Session;
     use crate::utils::test_utils::unique_keyspace_name;
     use crate::{
         batch::{Batch, BatchStatement},
         prepared_statement::PreparedStatement,
-        CachingSession, Session, SessionBuilder,
+        SessionBuilder,
     };
     use futures::TryStreamExt;
+    use scylla_cql::_macro_internal::Row;
     use std::collections::BTreeSet;
 
     async fn new_for_test() -> Session {
         let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
         let session = SessionBuilder::new()
             .known_node(uri)
-            .build()
+            .build_new_api()
             .await
             .expect("Could not create session");
         let ks = unique_keyspace_name();
@@ -432,7 +435,8 @@ mod tests {
         let iter = session
             .execute_iter("select * from test_table", &[])
             .await
-            .unwrap();
+            .unwrap()
+            .into_typed::<Row>();
 
         let rows = iter.try_collect::<Vec<_>>().await.unwrap().len();
 
@@ -464,7 +468,7 @@ mod tests {
             .execute("SELECT a, b FROM test_batch_table", ())
             .await
             .unwrap()
-            .rows_typed::<(i32, i32)>()
+            .rows::<(i32, i32)>()
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
@@ -670,7 +674,8 @@ mod tests {
             .execute("SELECT b, WRITETIME(b) FROM tbl", ())
             .await
             .unwrap()
-            .rows_typed_or_empty::<(i32, i64)>()
+            .rows::<(i32, i64)>()
+            .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
