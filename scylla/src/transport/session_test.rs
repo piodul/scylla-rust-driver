@@ -1,6 +1,4 @@
-use crate as scylla;
 use crate::batch::{Batch, BatchStatement};
-use crate::frame::response::result::Row;
 use crate::frame::value::ValueList;
 use crate::prepared_statement::PreparedStatement;
 use crate::query::Query;
@@ -10,19 +8,20 @@ use crate::statement::Consistency;
 use crate::tracing::{GetTracingConfig, TracingInfo};
 use crate::transport::errors::{BadKeyspaceName, BadQuery, DbError, QueryError};
 use crate::transport::partitioner::{Murmur3Partitioner, Partitioner, PartitionerName};
+use crate::transport::session::Session;
 use crate::transport::topology::Strategy::SimpleStrategy;
 use crate::transport::topology::{
     CollectionType, ColumnKind, CqlType, NativeType, UserDefinedType,
 };
 use crate::utils::test_utils::{supports_feature, unique_keyspace_name};
-use crate::ExecutionProfile;
-use crate::LegacyCachingSession;
-use crate::LegacyQueryResult;
-use crate::{LegacySession, SessionBuilder};
+use crate::SessionBuilder;
+use crate::{self as scylla, QueryResult};
+use crate::{CachingSession, ExecutionProfile};
 use assert_matches::assert_matches;
 use bytes::Bytes;
-use futures::{FutureExt, StreamExt, TryStreamExt};
+use futures::{FutureExt, TryStreamExt};
 use itertools::Itertools;
+use scylla_cql::frame::response::result::Row;
 use scylla_cql::frame::value::Value;
 use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap};
@@ -63,11 +62,7 @@ async fn test_connection_failure() {
 #[tokio::test]
 async fn test_unprepared_statement() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -109,29 +104,24 @@ async fn test_unprepared_statement() {
         .await
         .unwrap();
 
-    let (a_idx, _) = query_result.get_column_spec("a").unwrap();
-    let (b_idx, _) = query_result.get_column_spec("b").unwrap();
-    let (c_idx, _) = query_result.get_column_spec("c").unwrap();
+    assert_eq!(query_result.get_column_spec("a").unwrap().0, 0);
+    assert_eq!(query_result.get_column_spec("b").unwrap().0, 1);
+    assert_eq!(query_result.get_column_spec("c").unwrap().0, 2);
     assert!(query_result.get_column_spec("d").is_none());
 
-    let rs = query_result.rows.unwrap();
+    let mut results = query_result
+        .rows::<(i32, i32, String)>()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
-    let mut results: Vec<(i32, i32, &String)> = rs
-        .iter()
-        .map(|r| {
-            let a = r.columns[a_idx].as_ref().unwrap().as_int().unwrap();
-            let b = r.columns[b_idx].as_ref().unwrap().as_int().unwrap();
-            let c = r.columns[c_idx].as_ref().unwrap().as_text().unwrap();
-            (a, b, c)
-        })
-        .collect();
     results.sort();
     assert_eq!(
         results,
         vec![
-            (1, 2, &String::from("abc")),
-            (1, 4, &String::from("hello")),
-            (7, 11, &String::from(""))
+            (1, 2, String::from("abc")),
+            (1, 4, String::from("hello")),
+            (7, 11, String::from(""))
         ]
     );
     let query_result = session
@@ -144,7 +134,7 @@ async fn test_unprepared_statement() {
         assert_eq!(spec.name, name); // Check column name.
         assert_eq!(spec.table_spec.ks_name, ks);
     }
-    let mut results_from_manual_paging: Vec<Row> = vec![];
+    let mut results_from_manual_paging = vec![];
     let query = Query::new(format!("SELECT a, b, c FROM {}.t", ks)).with_page_size(1);
     let mut paging_state: Option<Bytes> = None;
     let mut watchdog = 0;
@@ -153,24 +143,25 @@ async fn test_unprepared_statement() {
             .query_paged(query.clone(), &[], paging_state)
             .await
             .unwrap();
-        results_from_manual_paging.append(&mut rs_manual.rows.unwrap());
-        if watchdog > 30 || rs_manual.paging_state.is_none() {
+        let mut page_results = rs_manual
+            .rows::<(i32, i32, String)>()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        results_from_manual_paging.append(&mut page_results);
+        if watchdog > 30 || rs_manual.paging_state().is_none() {
             break;
         }
         watchdog += 1;
-        paging_state = rs_manual.paging_state;
+        paging_state = rs_manual.paging_state();
     }
-    assert_eq!(results_from_manual_paging, rs);
+    assert_eq!(results_from_manual_paging, results);
 }
 
 #[tokio::test]
 async fn test_prepared_statement() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -232,7 +223,7 @@ async fn test_prepared_statement() {
             .query(format!("SELECT token(a) FROM {}.t2", ks), &[])
             .await
             .unwrap()
-            .single_row_typed()
+            .single_row::<(i64,)>()
             .unwrap();
         let token = Token { value };
         let prepared_token = Murmur3Partitioner::hash(
@@ -252,7 +243,7 @@ async fn test_prepared_statement() {
             .query(format!("SELECT token(a,b,c) FROM {}.complex_pk", ks), &[])
             .await
             .unwrap()
-            .single_row_typed()
+            .single_row::<(i64,)>()
             .unwrap();
         let token = Token { value };
         let prepared_token = Murmur3Partitioner::hash(
@@ -274,15 +265,14 @@ async fn test_prepared_statement() {
             .query(format!("SELECT a,b,c FROM {}.t2", ks), &[])
             .await
             .unwrap()
-            .rows
+            .rows::<(i32, i32, String)>()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        let r = rs.first().unwrap();
-        let a = r.columns[0].as_ref().unwrap().as_int().unwrap();
-        let b = r.columns[1].as_ref().unwrap().as_int().unwrap();
-        let c = r.columns[2].as_ref().unwrap().as_text().unwrap();
-        assert_eq!((a, b, c), (17, 16, &String::from("I'm prepared!!!")));
+        let r = &rs[0];
+        assert_eq!(r, &(17, 16, String::from("I'm prepared!!!")));
 
-        let mut results_from_manual_paging: Vec<Row> = vec![];
+        let mut results_from_manual_paging = vec![];
         let query = Query::new(format!("SELECT a, b, c FROM {}.t2", ks)).with_page_size(1);
         let prepared_paged = session.prepare(query).await.unwrap();
         let mut paging_state: Option<Bytes> = None;
@@ -292,12 +282,17 @@ async fn test_prepared_statement() {
                 .execute_paged(&prepared_paged, &[], paging_state)
                 .await
                 .unwrap();
-            results_from_manual_paging.append(&mut rs_manual.rows.unwrap());
-            if watchdog > 30 || rs_manual.paging_state.is_none() {
+            let mut page_results = rs_manual
+                .rows::<(i32, i32, String)>()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            results_from_manual_paging.append(&mut page_results);
+            if watchdog > 30 || rs_manual.paging_state().is_none() {
                 break;
             }
             watchdog += 1;
-            paging_state = rs_manual.paging_state;
+            paging_state = rs_manual.paging_state();
         }
         assert_eq!(results_from_manual_paging, rs);
     }
@@ -306,7 +301,7 @@ async fn test_prepared_statement() {
             .query(format!("SELECT a,b,c,d,e FROM {}.complex_pk", ks), &[])
             .await
             .unwrap()
-            .single_row_typed()
+            .single_row::<(i32, i32, String, i32, Option<i32>)>()
             .unwrap();
         assert!(e.is_none());
         assert_eq!(
@@ -351,6 +346,8 @@ async fn test_prepared_statement() {
             )
             .await
             .unwrap()
+            .into_legacy_result() // TODO: Fix after macros are added
+            .unwrap()
             .single_row_typed()
             .unwrap();
         assert_eq!(input, output)
@@ -360,13 +357,7 @@ async fn test_prepared_statement() {
 #[tokio::test]
 async fn test_batch() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = Arc::new(
-        SessionBuilder::new()
-            .known_node(uri)
-            .build_legacy()
-            .await
-            .unwrap(),
-    );
+    let session = Arc::new(SessionBuilder::new().known_node(uri).build().await.unwrap());
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -420,7 +411,7 @@ async fn test_batch() {
         .query(format!("SELECT a, b, c FROM {}.t_batch", ks), &[])
         .await
         .unwrap()
-        .rows_typed()
+        .rows::<(i32, i32, String)>()
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -457,7 +448,7 @@ async fn test_batch() {
         )
         .await
         .unwrap()
-        .rows_typed()
+        .rows::<(i32, i32, String)>()
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -468,11 +459,7 @@ async fn test_batch() {
 #[tokio::test]
 async fn test_token_calculation() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -511,7 +498,7 @@ async fn test_token_calculation() {
             )
             .await
             .unwrap()
-            .single_row_typed()
+            .single_row::<(i64,)>()
             .unwrap();
         let token = Token { value };
         let prepared_token = Murmur3Partitioner::hash(
@@ -533,7 +520,7 @@ async fn test_use_keyspace() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
     let session = SessionBuilder::new()
         .known_node(&uri)
-        .build_legacy()
+        .build()
         .await
         .unwrap();
     let ks = unique_keyspace_name();
@@ -564,7 +551,7 @@ async fn test_use_keyspace() {
         .query("SELECT * FROM tab", &[])
         .await
         .unwrap()
-        .rows_typed::<(String,)>()
+        .rows::<(String,)>()
         .unwrap()
         .map(|res| res.unwrap().0)
         .collect();
@@ -603,10 +590,10 @@ async fn test_use_keyspace() {
     ));
 
     // Make sure that use_keyspace on SessionBuiler works
-    let session2: LegacySession = SessionBuilder::new()
+    let session2: Session = SessionBuilder::new()
         .known_node(uri)
         .use_keyspace(ks.clone(), false)
-        .build_legacy()
+        .build()
         .await
         .unwrap();
 
@@ -614,7 +601,7 @@ async fn test_use_keyspace() {
         .query("SELECT * FROM tab", &[])
         .await
         .unwrap()
-        .rows_typed::<(String,)>()
+        .rows::<(String,)>()
         .unwrap()
         .map(|res| res.unwrap().0)
         .collect();
@@ -629,7 +616,7 @@ async fn test_use_keyspace_case_sensitivity() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
     let session = SessionBuilder::new()
         .known_node(&uri)
-        .build_legacy()
+        .build()
         .await
         .unwrap();
     let ks_lower = unique_keyspace_name().to_lowercase();
@@ -678,7 +665,7 @@ async fn test_use_keyspace_case_sensitivity() {
         .query("SELECT * from tab", &[])
         .await
         .unwrap()
-        .rows_typed::<(String,)>()
+        .rows::<(String,)>()
         .unwrap()
         .map(|row| row.unwrap().0)
         .collect();
@@ -693,7 +680,7 @@ async fn test_use_keyspace_case_sensitivity() {
         .query("SELECT * from tab", &[])
         .await
         .unwrap()
-        .rows_typed::<(String,)>()
+        .rows::<(String,)>()
         .unwrap()
         .map(|row| row.unwrap().0)
         .collect();
@@ -706,7 +693,7 @@ async fn test_raw_use_keyspace() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
     let session = SessionBuilder::new()
         .known_node(&uri)
-        .build_legacy()
+        .build()
         .await
         .unwrap();
     let ks = unique_keyspace_name();
@@ -738,7 +725,7 @@ async fn test_raw_use_keyspace() {
         .query("SELECT * FROM tab", &[])
         .await
         .unwrap()
-        .rows_typed::<(String,)>()
+        .rows::<(String,)>()
         .unwrap()
         .map(|res| res.unwrap().0)
         .collect();
@@ -760,11 +747,7 @@ async fn test_raw_use_keyspace() {
 #[tokio::test]
 async fn test_fetch_system_keyspace() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
 
     let prepared_statement = session
         .prepare("SELECT * FROM system_schema.keyspaces")
@@ -778,11 +761,7 @@ async fn test_fetch_system_keyspace() {
 #[tokio::test]
 async fn test_db_errors() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     // SyntaxError on bad query
@@ -837,11 +816,7 @@ async fn test_db_errors() {
 #[tokio::test]
 async fn test_tracing() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -863,36 +838,35 @@ async fn test_tracing() {
     test_tracing_batch(&session, ks.clone()).await;
 }
 
-async fn test_tracing_query(session: &LegacySession, ks: String) {
+async fn test_tracing_query(session: &Session, ks: String) {
     // A query without tracing enabled has no tracing uuid in result
     let untraced_query: Query = Query::new(format!("SELECT * FROM {}.tab", ks));
-    let untraced_query_result: LegacyQueryResult =
-        session.query(untraced_query, &[]).await.unwrap();
+    let untraced_query_result: QueryResult = session.query(untraced_query, &[]).await.unwrap();
 
-    assert!(untraced_query_result.tracing_id.is_none());
+    assert!(untraced_query_result.tracing_id().is_none());
 
     // A query with tracing enabled has a tracing uuid in result
     let mut traced_query: Query = Query::new(format!("SELECT * FROM {}.tab", ks));
     traced_query.config.tracing = true;
 
-    let traced_query_result: LegacyQueryResult = session.query(traced_query, &[]).await.unwrap();
-    assert!(traced_query_result.tracing_id.is_some());
+    let traced_query_result: QueryResult = session.query(traced_query, &[]).await.unwrap();
+    assert!(traced_query_result.tracing_id().is_some());
 
     // Querying this uuid from tracing table gives some results
-    assert_in_tracing_table(session, traced_query_result.tracing_id.unwrap()).await;
+    assert_in_tracing_table(session, traced_query_result.tracing_id().unwrap()).await;
 }
 
-async fn test_tracing_execute(session: &LegacySession, ks: String) {
+async fn test_tracing_execute(session: &Session, ks: String) {
     // Executing a prepared statement without tracing enabled has no tracing uuid in result
     let untraced_prepared = session
         .prepare(format!("SELECT * FROM {}.tab", ks))
         .await
         .unwrap();
 
-    let untraced_prepared_result: LegacyQueryResult =
+    let untraced_prepared_result: QueryResult =
         session.execute(&untraced_prepared, &[]).await.unwrap();
 
-    assert!(untraced_prepared_result.tracing_id.is_none());
+    assert!(untraced_prepared_result.tracing_id().is_none());
 
     // Executing a prepared statement with tracing enabled has a tracing uuid in result
     let mut traced_prepared = session
@@ -902,15 +876,14 @@ async fn test_tracing_execute(session: &LegacySession, ks: String) {
 
     traced_prepared.config.tracing = true;
 
-    let traced_prepared_result: LegacyQueryResult =
-        session.execute(&traced_prepared, &[]).await.unwrap();
-    assert!(traced_prepared_result.tracing_id.is_some());
+    let traced_prepared_result: QueryResult = session.execute(&traced_prepared, &[]).await.unwrap();
+    assert!(traced_prepared_result.tracing_id().is_some());
 
     // Querying this uuid from tracing table gives some results
-    assert_in_tracing_table(session, traced_prepared_result.tracing_id.unwrap()).await;
+    assert_in_tracing_table(session, traced_prepared_result.tracing_id().unwrap()).await;
 }
 
-async fn test_tracing_prepare(session: &LegacySession, ks: String) {
+async fn test_tracing_prepare(session: &Session, ks: String) {
     // Preparing a statement without tracing enabled has no tracing uuids in result
     let untraced_prepared = session
         .prepare(format!("SELECT * FROM {}.tab", ks))
@@ -932,13 +905,13 @@ async fn test_tracing_prepare(session: &LegacySession, ks: String) {
     }
 }
 
-async fn test_get_tracing_info(session: &LegacySession, ks: String) {
+async fn test_get_tracing_info(session: &Session, ks: String) {
     // A query with tracing enabled has a tracing uuid in result
     let mut traced_query: Query = Query::new(format!("SELECT * FROM {}.tab", ks));
     traced_query.config.tracing = true;
 
-    let traced_query_result: LegacyQueryResult = session.query(traced_query, &[]).await.unwrap();
-    let tracing_id: Uuid = traced_query_result.tracing_id.unwrap();
+    let traced_query_result: QueryResult = session.query(traced_query, &[]).await.unwrap();
+    let tracing_id: Uuid = traced_query_result.tracing_id().unwrap();
 
     // The reason why we enable so long waiting for TracingInfo is... Cassandra. (Yes, again.)
     // In Cassandra Java Driver, the wait time for tracing info is 10 seconds, so here we do the same.
@@ -959,7 +932,7 @@ async fn test_get_tracing_info(session: &LegacySession, ks: String) {
     assert!(!tracing_info.nodes().is_empty());
 }
 
-async fn test_tracing_query_iter(session: &LegacySession, ks: String) {
+async fn test_tracing_query_iter(session: &Session, ks: String) {
     // A query without tracing enabled has no tracing ids
     let untraced_query: Query = Query::new(format!("SELECT * FROM {}.tab", ks));
 
@@ -986,7 +959,7 @@ async fn test_tracing_query_iter(session: &LegacySession, ks: String) {
     assert!(!traced_row_iter.get_tracing_ids().is_empty());
 
     // The same is true for TypedRowIter
-    let traced_typed_row_iter = traced_row_iter.into_typed::<(i32,)>();
+    let traced_typed_row_iter = traced_row_iter.into_legacy().into_typed::<(i32,)>();
     assert!(!traced_typed_row_iter.get_tracing_ids().is_empty());
 
     for tracing_id in traced_typed_row_iter.get_tracing_ids() {
@@ -994,7 +967,7 @@ async fn test_tracing_query_iter(session: &LegacySession, ks: String) {
     }
 }
 
-async fn test_tracing_execute_iter(session: &LegacySession, ks: String) {
+async fn test_tracing_execute_iter(session: &Session, ks: String) {
     // A prepared statement without tracing enabled has no tracing ids
     let untraced_prepared = session
         .prepare(format!("SELECT * FROM {}.tab", ks))
@@ -1009,7 +982,7 @@ async fn test_tracing_execute_iter(session: &LegacySession, ks: String) {
     assert!(untraced_row_iter.get_tracing_ids().is_empty());
 
     // The same is true for TypedRowIter
-    let untraced_typed_row_iter = untraced_row_iter.into_typed::<(i32,)>();
+    let untraced_typed_row_iter = untraced_row_iter.into_legacy().into_typed::<(i32,)>();
     assert!(untraced_typed_row_iter.get_tracing_ids().is_empty());
 
     // A prepared statement with tracing enabled has a tracing ids in result
@@ -1027,7 +1000,7 @@ async fn test_tracing_execute_iter(session: &LegacySession, ks: String) {
     assert!(!traced_row_iter.get_tracing_ids().is_empty());
 
     // The same is true for TypedRowIter
-    let traced_typed_row_iter = traced_row_iter.into_typed::<(i32,)>();
+    let traced_typed_row_iter = traced_row_iter.into_legacy().into_typed::<(i32,)>();
     assert!(!traced_typed_row_iter.get_tracing_ids().is_empty());
 
     for tracing_id in traced_typed_row_iter.get_tracing_ids() {
@@ -1035,27 +1008,26 @@ async fn test_tracing_execute_iter(session: &LegacySession, ks: String) {
     }
 }
 
-async fn test_tracing_batch(session: &LegacySession, ks: String) {
+async fn test_tracing_batch(session: &Session, ks: String) {
     // A batch without tracing enabled has no tracing id
     let mut untraced_batch: Batch = Default::default();
     untraced_batch.append_statement(&format!("INSERT INTO {}.tab (a) VALUES('a')", ks)[..]);
 
-    let untraced_batch_result: LegacyQueryResult =
-        session.batch(&untraced_batch, ((),)).await.unwrap();
-    assert!(untraced_batch_result.tracing_id.is_none());
+    let untraced_batch_result: QueryResult = session.batch(&untraced_batch, ((),)).await.unwrap();
+    assert!(untraced_batch_result.tracing_id().is_none());
 
     // Batch with tracing enabled has a tracing uuid in result
     let mut traced_batch: Batch = Default::default();
     traced_batch.append_statement(&format!("INSERT INTO {}.tab (a) VALUES('a')", ks)[..]);
     traced_batch.config.tracing = true;
 
-    let traced_batch_result: LegacyQueryResult = session.batch(&traced_batch, ((),)).await.unwrap();
-    assert!(traced_batch_result.tracing_id.is_some());
+    let traced_batch_result: QueryResult = session.batch(&traced_batch, ((),)).await.unwrap();
+    assert!(traced_batch_result.tracing_id().is_some());
 
-    assert_in_tracing_table(session, traced_batch_result.tracing_id.unwrap()).await;
+    assert_in_tracing_table(session, traced_batch_result.tracing_id().unwrap()).await;
 }
 
-async fn assert_in_tracing_table(session: &LegacySession, tracing_uuid: Uuid) {
+async fn assert_in_tracing_table(session: &Session, tracing_uuid: Uuid) {
     let mut traces_query = Query::new("SELECT * FROM system_traces.sessions WHERE session_id = ?");
     traces_query.config.consistency = Some(Consistency::One);
 
@@ -1086,22 +1058,14 @@ async fn assert_in_tracing_table(session: &LegacySession, tracing_uuid: Uuid) {
 #[tokio::test]
 async fn test_fetch_schema_version() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     session.fetch_schema_version().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_await_schema_agreement() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     session.await_schema_agreement().await.unwrap();
 }
 
@@ -1109,11 +1073,7 @@ async fn test_await_schema_agreement() {
 async fn test_await_timed_schema_agreement() {
     use std::time::Duration;
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     session
         .await_timed_schema_agreement(Duration::from_millis(50))
         .await
@@ -1123,11 +1083,7 @@ async fn test_await_timed_schema_agreement() {
 #[tokio::test]
 async fn test_timestamp() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -1215,7 +1171,7 @@ async fn test_timestamp() {
         )
         .await
         .unwrap()
-        .rows_typed::<(String, String, i64)>()
+        .rows::<(String, String, i64)>()
         .unwrap()
         .map(Result::unwrap)
         .collect::<Vec<_>>();
@@ -1833,11 +1789,7 @@ async fn test_turning_off_schema_fetching() {
 #[tokio::test]
 async fn test_named_bind_markers() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session
@@ -1871,7 +1823,7 @@ async fn test_named_bind_markers() {
         .query("SELECT pk, ck, v FROM t", &[])
         .await
         .unwrap()
-        .rows_typed::<(i32, i32, i32)>()
+        .rows::<(i32, i32, i32)>()
         .unwrap()
         .map(|res| res.unwrap())
         .collect();
@@ -1946,14 +1898,14 @@ async fn test_prepared_partitioner() {
     );
 }
 
-async fn rename(session: &LegacySession, rename_str: &str) {
+async fn rename(session: &Session, rename_str: &str) {
     session
         .query(format!("ALTER TABLE tab RENAME {}", rename_str), ())
         .await
         .unwrap();
 }
 
-async fn rename_caching(session: &LegacyCachingSession, rename_str: &str) {
+async fn rename_caching(session: &CachingSession, rename_str: &str) {
     session
         .execute(format!("ALTER TABLE tab RENAME {}", rename_str), &())
         .await
@@ -1972,11 +1924,7 @@ async fn test_unprepared_reprepare_in_execute() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2013,7 +1961,7 @@ async fn test_unprepared_reprepare_in_execute() {
         .query("SELECT a, b, c FROM tab", ())
         .await
         .unwrap()
-        .rows_typed::<(i32, i32, i32)>()
+        .rows::<(i32, i32, i32)>()
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -2026,11 +1974,7 @@ async fn test_unusual_valuelists() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2067,7 +2011,7 @@ async fn test_unusual_valuelists() {
         .query("SELECT a, b, c FROM tab", ())
         .await
         .unwrap()
-        .rows_typed::<(i32, i32, String)>()
+        .rows::<(i32, i32, String)>()
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -2093,11 +2037,7 @@ async fn test_unprepared_reprepare_in_batch() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2143,7 +2083,7 @@ async fn test_unprepared_reprepare_in_batch() {
         .query("SELECT a, b, c FROM tab", ())
         .await
         .unwrap()
-        .rows_typed::<(i32, i32, i32)>()
+        .rows::<(i32, i32, i32)>()
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -2163,17 +2103,13 @@ async fn test_unprepared_reprepare_in_caching_session_execute() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
     session.use_keyspace(ks, false).await.unwrap();
 
-    let caching_session: LegacyCachingSession = LegacyCachingSession::from(session, 64);
+    let caching_session: CachingSession = CachingSession::from(session, 64);
 
     caching_session
         .execute(
@@ -2215,7 +2151,7 @@ async fn test_unprepared_reprepare_in_caching_session_execute() {
         .execute("SELECT a, b, c FROM tab", &())
         .await
         .unwrap()
-        .rows_typed::<(i32, i32, i32)>()
+        .rows::<(i32, i32, i32)>()
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -2228,11 +2164,7 @@ async fn test_views_in_schema_info() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2282,12 +2214,12 @@ async fn test_views_in_schema_info() {
     )
 }
 
-async fn assert_test_batch_table_rows_contain(sess: &LegacySession, expected_rows: &[(i32, i32)]) {
+async fn assert_test_batch_table_rows_contain(sess: &Session, expected_rows: &[(i32, i32)]) {
     let selected_rows: BTreeSet<(i32, i32)> = sess
         .query("SELECT a, b FROM test_batch_table", ())
         .await
         .unwrap()
-        .rows_typed::<(i32, i32)>()
+        .rows::<(i32, i32)>()
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -2304,11 +2236,7 @@ async fn assert_test_batch_table_rows_contain(sess: &LegacySession, expected_row
 #[tokio::test]
 async fn test_prepare_batch() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
 
     let ks = unique_keyspace_name();
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2406,11 +2334,7 @@ async fn test_prepare_batch() {
 #[tokio::test]
 async fn test_refresh_metadata_after_schema_agreement() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
 
     let ks = unique_keyspace_name();
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2449,11 +2373,7 @@ async fn test_refresh_metadata_after_schema_agreement() {
 #[tokio::test]
 async fn test_rate_limit_exceeded_exception() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
 
     // Typed errors in RPC were introduced along with per-partition rate limiting.
     // There is no dedicated feature for per-partition rate limiting, so we are
@@ -2502,11 +2422,7 @@ async fn test_rate_limit_exceeded_exception() {
 #[tokio::test]
 async fn test_batch_lwts() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
 
     let ks = unique_keyspace_name();
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
@@ -2530,10 +2446,10 @@ async fn test_batch_lwts() {
     batch.append_statement("INSERT INTO tab (p1, c1, r1, r2) VALUES (0, 123, 321, 312)");
     batch.append_statement("UPDATE tab SET r1 = 1 WHERE p1 = 0 AND c1 = 0 IF r2 = 0");
 
-    let batch_res: LegacyQueryResult = session.batch(&batch, ((), (), ())).await.unwrap();
+    let batch_res: QueryResult = session.batch(&batch, ((), (), ())).await.unwrap();
 
     // Scylla returns 5 columns, but Cassandra returns only 1
-    let is_scylla: bool = batch_res.col_specs.len() == 5;
+    let is_scylla: bool = batch_res.column_specs().unwrap().len() == 5;
 
     if is_scylla {
         test_batch_lwts_for_scylla(&session, &batch, batch_res).await;
@@ -2542,21 +2458,14 @@ async fn test_batch_lwts() {
     }
 }
 
-async fn test_batch_lwts_for_scylla(
-    session: &LegacySession,
-    batch: &Batch,
-    batch_res: LegacyQueryResult,
-) {
+async fn test_batch_lwts_for_scylla(session: &Session, batch: &Batch, batch_res: QueryResult) {
     // Alias required by clippy
     type IntOrNull = Option<i32>;
 
     // Returned columns are:
     // [applied], p1, c1, r1, r2
-    let batch_res_rows: Vec<(bool, IntOrNull, IntOrNull, IntOrNull, IntOrNull)> = batch_res
-        .rows_typed()
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+    let batch_res_rows: Vec<(bool, IntOrNull, IntOrNull, IntOrNull, IntOrNull)> =
+        batch_res.rows().unwrap().map(|r| r.unwrap()).collect();
 
     let expected_batch_res_rows = vec![
         (true, Some(0), Some(0), Some(0), Some(0)),
@@ -2567,12 +2476,12 @@ async fn test_batch_lwts_for_scylla(
     assert_eq!(batch_res_rows, expected_batch_res_rows);
 
     let prepared_batch: Batch = session.prepare_batch(batch).await.unwrap();
-    let prepared_batch_res: LegacyQueryResult =
+    let prepared_batch_res: QueryResult =
         session.batch(&prepared_batch, ((), (), ())).await.unwrap();
 
     let prepared_batch_res_rows: Vec<(bool, IntOrNull, IntOrNull, IntOrNull, IntOrNull)> =
         prepared_batch_res
-            .rows_typed()
+            .rows()
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
@@ -2586,35 +2495,27 @@ async fn test_batch_lwts_for_scylla(
     assert_eq!(prepared_batch_res_rows, expected_prepared_batch_res_rows);
 }
 
-async fn test_batch_lwts_for_cassandra(
-    session: &LegacySession,
-    batch: &Batch,
-    batch_res: LegacyQueryResult,
-) {
+async fn test_batch_lwts_for_cassandra(session: &Session, batch: &Batch, batch_res: QueryResult) {
     // Alias required by clippy
     type IntOrNull = Option<i32>;
 
     // Returned columns are:
     // [applied]
-    let batch_res_rows: Vec<(bool,)> = batch_res
-        .rows_typed()
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+    let batch_res_rows: Vec<(bool,)> = batch_res.rows().unwrap().map(|r| r.unwrap()).collect();
 
     let expected_batch_res_rows = vec![(true,)];
 
     assert_eq!(batch_res_rows, expected_batch_res_rows);
 
     let prepared_batch: Batch = session.prepare_batch(batch).await.unwrap();
-    let prepared_batch_res: LegacyQueryResult =
+    let prepared_batch_res: QueryResult =
         session.batch(&prepared_batch, ((), (), ())).await.unwrap();
 
     // Returned columns are:
     // [applied], p1, c1, r1, r2
     let prepared_batch_res_rows: Vec<(bool, IntOrNull, IntOrNull, IntOrNull, IntOrNull)> =
         prepared_batch_res
-            .rows_typed()
+            .rows()
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
@@ -2632,7 +2533,7 @@ async fn test_keyspaces_to_fetch() {
 
     let session_default = SessionBuilder::new()
         .known_node(&uri)
-        .build_legacy()
+        .build()
         .await
         .unwrap();
     for ks in [&ks1, &ks2] {
@@ -2654,7 +2555,7 @@ async fn test_keyspaces_to_fetch() {
     let session1 = SessionBuilder::new()
         .known_node(&uri)
         .keyspaces_to_fetch([&ks1])
-        .build_legacy()
+        .build()
         .await
         .unwrap();
     assert!(session1.get_cluster_data().keyspaces.contains_key(&ks1));
@@ -2663,7 +2564,7 @@ async fn test_keyspaces_to_fetch() {
     let session_all = SessionBuilder::new()
         .known_node(&uri)
         .keyspaces_to_fetch([] as [String; 0])
-        .build_legacy()
+        .build()
         .await
         .unwrap();
     assert!(session_all.get_cluster_data().keyspaces.contains_key(&ks1));
@@ -2710,7 +2611,7 @@ async fn test_iter_works_when_retry_policy_returns_ignore_write_error() {
     let session = SessionBuilder::new()
         .known_node(&uri)
         .default_execution_profile_handle(handle)
-        .build_legacy()
+        .build()
         .await
         .unwrap();
 
@@ -2730,7 +2631,8 @@ async fn test_iter_works_when_retry_policy_returns_ignore_write_error() {
     let mut iter = session
         .query_iter("INSERT INTO t (pk v) VALUES (1, 2)", ())
         .await
-        .unwrap();
+        .unwrap()
+        .into_typed::<Row>();
 
     assert!(retried_flag.load(Ordering::Relaxed));
     while iter.try_next().await.unwrap().is_some() {}
@@ -2741,7 +2643,11 @@ async fn test_iter_works_when_retry_policy_returns_ignore_write_error() {
         .prepare("INSERT INTO t (pk, v) VALUES (?, ?)")
         .await
         .unwrap();
-    let mut iter = session.execute_iter(p, (1, 2)).await.unwrap();
+    let mut iter = session
+        .execute_iter(p, (1, 2))
+        .await
+        .unwrap()
+        .into_typed::<Row>();
 
     assert!(retried_flag.load(Ordering::Relaxed));
     while iter.try_next().await.unwrap().is_some() {}
@@ -2750,11 +2656,7 @@ async fn test_iter_works_when_retry_policy_returns_ignore_write_error() {
 #[tokio::test]
 async fn test_iter_methods_with_modification_statements() {
     let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();

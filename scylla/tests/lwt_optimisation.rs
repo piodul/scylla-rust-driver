@@ -2,7 +2,7 @@ mod utils;
 
 use scylla::frame::types;
 use scylla::retry_policy::FallthroughRetryPolicy;
-use scylla::transport::session::LegacySession;
+use scylla::transport::session::Session;
 use scylla::{frame::protocol_features::ProtocolFeatures, test_utils::unique_keyspace_name};
 use scylla::{ExecutionProfile, SessionBuilder};
 use std::sync::Arc;
@@ -49,11 +49,11 @@ async fn if_lwt_optimisation_mark_offered_then_negotiatied_and_lwt_routed_optima
             .into_handle();
 
         // DB preparation phase
-        let session: LegacySession = SessionBuilder::new()
+        let session: Session = SessionBuilder::new()
             .known_node(proxy_uris[0].as_str())
             .default_execution_profile_handle(handle)
             .address_translator(Arc::new(translation_map))
-            .build_legacy()
+            .build()
             .await
             .unwrap();
 

@@ -1,19 +1,17 @@
-use crate::cql_to_rust::FromCqlVal;
+use crate::transport::session::Session;
+use scylla_cql::types::deserialize::value::DeserializeCql;
+
 use crate::frame::value::Value;
 use crate::utils::test_utils::unique_keyspace_name;
-use crate::{frame::response::result::CqlValue, LegacySession, SessionBuilder};
+use crate::{frame::response::result::CqlValue, SessionBuilder};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env,
 };
 
-async fn connect() -> LegacySession {
+async fn connect() -> Session {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build_legacy()
-        .await
-        .unwrap();
+    let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
     session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class' : 'SimpleStrategy', 'replication_factor' : 1}}", ks), &[]).await.unwrap();
     session.use_keyspace(ks, false).await.unwrap();
@@ -21,7 +19,7 @@ async fn connect() -> LegacySession {
     session
 }
 
-async fn create_table(session: &LegacySession, table_name: &str, value_type: &str) {
+async fn create_table(session: &Session, table_name: &str, value_type: &str) {
     session
         .query(
             format!(
@@ -35,13 +33,13 @@ async fn create_table(session: &LegacySession, table_name: &str, value_type: &st
 }
 
 async fn insert_and_select<InsertT, SelectT>(
-    session: &LegacySession,
+    session: &Session,
     table_name: &str,
     to_insert: &InsertT,
     expected: &SelectT,
 ) where
     InsertT: Value,
-    SelectT: FromCqlVal<Option<CqlValue>> + PartialEq + std::fmt::Debug,
+    SelectT: for<'r> DeserializeCql<'r> + PartialEq + std::fmt::Debug,
 {
     session
         .query(
@@ -55,7 +53,7 @@ async fn insert_and_select<InsertT, SelectT>(
         .query(format!("SELECT val FROM {} WHERE p = 0", table_name), ())
         .await
         .unwrap()
-        .single_row_typed::<(SelectT,)>()
+        .single_row::<(SelectT,)>()
         .unwrap()
         .0;
 
@@ -64,7 +62,7 @@ async fn insert_and_select<InsertT, SelectT>(
 
 #[tokio::test]
 async fn test_cql_list() {
-    let session: LegacySession = connect().await;
+    let session: Session = connect().await;
 
     let table_name: &str = "test_cql_list_tab";
     create_table(&session, table_name, "list<int>").await;
@@ -96,7 +94,7 @@ async fn test_cql_list() {
 
 #[tokio::test]
 async fn test_cql_set() {
-    let session: LegacySession = connect().await;
+    let session: Session = connect().await;
 
     let table_name: &str = "test_cql_set_tab";
     create_table(&session, table_name, "set<int>").await;
@@ -159,7 +157,7 @@ async fn test_cql_set() {
 
 #[tokio::test]
 async fn test_cql_map() {
-    let session: LegacySession = connect().await;
+    let session: Session = connect().await;
 
     let table_name: &str = "test_cql_map_tab";
     create_table(&session, table_name, "map<int, int>").await;
@@ -209,7 +207,7 @@ async fn test_cql_map() {
 
 #[tokio::test]
 async fn test_cql_tuple() {
-    let session: LegacySession = connect().await;
+    let session: Session = connect().await;
 
     let table_name: &str = "test_cql_tuple_tab";
     create_table(&session, table_name, "tuple<int, int, text>").await;
