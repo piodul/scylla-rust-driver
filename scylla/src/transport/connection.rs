@@ -33,7 +33,7 @@ use std::{
 };
 
 use super::errors::{BadKeyspaceName, DbError, QueryError};
-use super::iterator::{LegacyRowIterator, RawIterator};
+use super::iterator::RawIterator;
 use super::query_result::{QueryResult, SingleRowError};
 use super::session::AddressTranslator;
 use super::topology::{PeerEndpoint, UntranslatedEndpoint, UntranslatedPeer};
@@ -576,7 +576,7 @@ impl Connection {
         self: Arc<Self>,
         query: Query,
         values: impl ValueList,
-    ) -> Result<LegacyRowIterator, QueryError> {
+    ) -> Result<RawIterator, QueryError> {
         let serialized_values = values.serialized()?.into_owned();
 
         let consistency = query
@@ -592,7 +592,6 @@ impl Connection {
             serial_consistency,
         )
         .await
-        .map(RawIterator::into_legacy)
     }
 
     #[allow(dead_code)]
@@ -1574,6 +1573,7 @@ mod tests {
     use scylla_cql::frame::protocol_features::{
         LWT_OPTIMIZATION_META_BIT_MASK_KEY, SCYLLA_LWT_ADD_METADATA_MARK_EXTENSION,
     };
+    use scylla_cql::frame::response::result::Row;
     use scylla_cql::frame::types;
     use scylla_proxy::{
         Condition, Node, Proxy, Reaction, RequestFrame, RequestOpcode, RequestReaction,
@@ -1667,6 +1667,7 @@ mod tests {
             .query_iter(select_query.clone(), &[])
             .await
             .unwrap()
+            .into_typed::<Row>()
             .try_collect::<Vec<_>>()
             .await
             .unwrap();
@@ -1700,6 +1701,7 @@ mod tests {
             .query_iter(insert_query, (0,))
             .await
             .unwrap()
+            .into_typed::<Row>()
             .try_collect::<Vec<_>>()
             .await
             .unwrap();
