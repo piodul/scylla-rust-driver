@@ -4,6 +4,7 @@ use crate::prepared_statement::PreparedStatement;
 use crate::query::Query;
 use crate::transport::errors::QueryError;
 use crate::transport::iterator::LegacyRowIterator;
+use crate::transport::iterator::RawIterator;
 use crate::transport::legacy_query_result::LegacyQueryResult;
 use crate::transport::partitioner::PartitionerName;
 use crate::transport::query_result::QueryResult;
@@ -14,7 +15,6 @@ use scylla_cql::frame::response::result::PreparedMetadata;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 
-use super::iterator::RawIterator;
 use super::session::{
     CurrentDeserializationApi, DeserializationApiKind, GenericSession, LegacyDeserializationApi,
 };
@@ -316,7 +316,7 @@ mod tests {
         SessionBuilder,
     };
     use futures::TryStreamExt;
-    use scylla_cql::_macro_internal::Row;
+    use scylla_cql::frame::response::result::Row;
     use std::collections::BTreeSet;
 
     async fn new_for_test() -> Session {
