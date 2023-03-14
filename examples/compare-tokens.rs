@@ -1,8 +1,9 @@
 use anyhow::Result;
 use scylla::frame::value::ValueList;
 use scylla::transport::partitioner::{Murmur3Partitioner, Partitioner};
+use scylla::transport::session::Session;
 use scylla::transport::NodeAddr;
-use scylla::{LegacySession, SessionBuilder};
+use scylla::SessionBuilder;
 use std::env;
 
 #[tokio::main]
@@ -11,7 +12,7 @@ async fn main() -> Result<()> {
 
     println!("Connecting to {} ...", uri);
 
-    let session: LegacySession = SessionBuilder::new().known_node(uri).build_legacy().await?;
+    let session: Session = SessionBuilder::new().known_node(uri).build().await?;
 
     session.query("CREATE KEYSPACE IF NOT EXISTS ks WITH REPLICATION = {'class' : 'SimpleStrategy', 'replication_factor' : 1}", &[]).await?;
 
@@ -49,7 +50,7 @@ async fn main() -> Result<()> {
         let (qt,) = session
             .query("SELECT token(pk) FROM ks.t where pk = ?", (pk,))
             .await?
-            .single_row_typed()?;
+            .single_row()?;
         assert_eq!(t, qt);
         println!("token for {}: {}", pk, t);
     }

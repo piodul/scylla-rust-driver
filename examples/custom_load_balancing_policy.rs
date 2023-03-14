@@ -2,7 +2,7 @@ use anyhow::Result;
 use scylla::{
     load_balancing::{LoadBalancingPolicy, Statement},
     transport::{ClusterData, ExecutionProfile, Node},
-    LegacySession, SessionBuilder,
+    Session, SessionBuilder,
 };
 use std::{env, sync::Arc};
 
@@ -46,10 +46,10 @@ async fn main() -> Result<()> {
         .load_balancing_policy(Arc::new(custom_load_balancing))
         .build();
 
-    let _session: LegacySession = SessionBuilder::new()
+    let _session: Session = SessionBuilder::new()
         .known_node(uri)
         .default_execution_profile_handle(profile.into_handle())
-        .build_legacy()
+        .build()
         .await?;
 
     Ok(())
