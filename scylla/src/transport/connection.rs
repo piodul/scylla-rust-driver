@@ -34,7 +34,7 @@ use std::{
 
 use super::errors::{BadKeyspaceName, DbError, QueryError};
 use super::iterator::RowIterator;
-use super::query_result::SingleRowTypedError;
+use super::legacy_query_result::SingleRowTypedError;
 use super::session::AddressTranslator;
 use super::topology::{PeerEndpoint, UntranslatedEndpoint, UntranslatedPeer};
 use super::NodeAddr;
@@ -59,7 +59,7 @@ use crate::transport::Compression;
 
 // Existing code imports scylla::transport::connection::QueryResult because it used to be located in this file.
 // Reexport QueryResult to avoid breaking the existing code.
-pub use crate::QueryResult;
+pub use crate::LegacyQueryResult;
 
 // Queries for schema agreement
 const LOCAL_VERSION: &str = "SELECT schema_version FROM system.local WHERE key='local'";
@@ -172,7 +172,7 @@ impl QueryResponse {
         })
     }
 
-    pub fn into_query_result(self) -> Result<QueryResult, QueryError> {
+    pub fn into_query_result(self) -> Result<LegacyQueryResult, QueryError> {
         self.into_non_error_query_response()?.into_query_result()
     }
 }
@@ -192,7 +192,7 @@ impl NonErrorQueryResponse {
         }
     }
 
-    pub fn into_query_result(self) -> Result<QueryResult, QueryError> {
+    pub fn into_query_result(self) -> Result<LegacyQueryResult, QueryError> {
         let (rows, paging_state, col_specs, serialized_size) = match self.response {
             NonErrorResponse::Result(result::Result::Rows(rs)) => (
                 Some(rs.rows),
@@ -208,7 +208,7 @@ impl NonErrorQueryResponse {
             }
         };
 
-        Ok(QueryResult {
+        Ok(LegacyQueryResult {
             rows,
             warnings: self.warnings,
             tracing_id: self.tracing_id,
@@ -468,7 +468,7 @@ impl Connection {
         &self,
         query: impl Into<Query>,
         values: impl ValueList,
-    ) -> Result<QueryResult, QueryError> {
+    ) -> Result<LegacyQueryResult, QueryError> {
         let query: Query = query.into();
 
         // This method is used only for driver internal queries, so no need to consult execution profile here.
@@ -492,7 +492,7 @@ impl Connection {
         values: impl ValueList,
         consistency: Consistency,
         serial_consistency: Option<SerialConsistency>,
-    ) -> Result<QueryResult, QueryError> {
+    ) -> Result<LegacyQueryResult, QueryError> {
         let query: Query = query.into();
         self.query_with_consistency(&query, &values, consistency, serial_consistency, None)
             .await?
@@ -615,7 +615,7 @@ impl Connection {
         &self,
         batch: &Batch,
         values: impl BatchValues,
-    ) -> Result<QueryResult, QueryError> {
+    ) -> Result<LegacyQueryResult, QueryError> {
         self.batch_with_consistency(
             batch,
             values,
@@ -633,7 +633,7 @@ impl Connection {
         values: impl BatchValues,
         consistency: Consistency,
         serial_consistency: Option<SerialConsistency>,
-    ) -> Result<QueryResult, QueryError> {
+    ) -> Result<LegacyQueryResult, QueryError> {
         let statements_iter = batch.statements.iter().map(|s| match s {
             BatchStatement::Query(q) => batch::BatchStatement::Query { text: &q.contents },
             BatchStatement::PreparedStatement(s) => {
