@@ -2,7 +2,7 @@ mod utils;
 
 use scylla::retry_policy::FallthroughRetryPolicy;
 use scylla::speculative_execution::SimpleSpeculativeExecutionPolicy;
-use scylla::transport::session::Session;
+use scylla::transport::session::NewDeserApiSession as Session;
 use scylla::ExecutionProfile;
 use scylla::SessionBuilder;
 use scylla::{query::Query, test_utils::unique_keyspace_name};
@@ -31,7 +31,7 @@ async fn speculative_execution_is_fired() {
             .known_node(proxy_uris[0].as_str())
             .default_execution_profile_handle(simple_speculative_no_retry_profile.into_handle())
             .address_translator(Arc::new(translation_map))
-            .build()
+            .build_new_api()
             .await
             .unwrap();
 
@@ -105,7 +105,7 @@ async fn retries_occur() {
         let session: Session = SessionBuilder::new()
             .known_node(proxy_uris[0].as_str())
             .address_translator(Arc::new(translation_map))
-            .build()
+            .build_new_api()
             .await
             .unwrap();
 

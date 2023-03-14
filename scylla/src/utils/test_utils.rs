@@ -4,7 +4,7 @@ use std::{
 };
 
 #[cfg(test)]
-use crate::Session;
+use crate::transport::session::NewDeserApiSession as Session;
 
 static UNIQUE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -40,11 +40,11 @@ pub(crate) async fn supports_feature(session: &Session, feature: &str) -> bool {
         return false;
     }
 
-    let (features,): (Option<String>,) = session
+    let (features,) = session
         .query("SELECT supported_features FROM system.local", ())
         .await
         .unwrap()
-        .single_row_typed()
+        .single_row::<(Option<String>,)>()
         .unwrap();
 
     features

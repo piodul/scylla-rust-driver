@@ -1,14 +1,21 @@
 use std::env;
 
+use scylla_cql::frame::response::result::Row;
+
 use crate::frame::{response::result::CqlValue, value::CqlDuration};
 
+use crate::transport::session::NewDeserApiSession as Session;
 use crate::utils::test_utils::unique_keyspace_name;
-use crate::{Session, SessionBuilder};
+use crate::SessionBuilder;
 
 #[tokio::test]
 async fn test_cqlvalue_udt() {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session: Session = SessionBuilder::new().known_node(uri).build().await.unwrap();
+    let session: Session = SessionBuilder::new()
+        .known_node(uri)
+        .build_new_api()
+        .await
+        .unwrap();
     let ks = unique_keyspace_name();
     session
         .query(
@@ -59,7 +66,9 @@ async fn test_cqlvalue_udt() {
         .query("SELECT my FROM cqlvalue_udt_test", &[])
         .await
         .unwrap()
-        .rows
+        .rows::<Row>()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
     assert_eq!(rows.len(), 1);
@@ -73,7 +82,11 @@ async fn test_cqlvalue_udt() {
 #[tokio::test]
 async fn test_cqlvalue_duration() {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session: Session = SessionBuilder::new().known_node(uri).build().await.unwrap();
+    let session: Session = SessionBuilder::new()
+        .known_node(uri)
+        .build_new_api()
+        .await
+        .unwrap();
 
     let ks = unique_keyspace_name();
     session
@@ -114,7 +127,9 @@ async fn test_cqlvalue_duration() {
         )
         .await
         .unwrap()
-        .rows
+        .rows::<Row>()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
     assert_eq!(rows.len(), 4);

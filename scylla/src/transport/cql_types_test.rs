@@ -1,16 +1,16 @@
 use crate as scylla;
-use crate::cql_to_rust::FromCqlVal;
 use crate::frame::response::result::CqlValue;
 use crate::frame::value::Counter;
 use crate::frame::value::Value;
 use crate::frame::value::{Date, Time, Timestamp};
 use crate::macros::{FromUserType, IntoUserType};
-use crate::transport::session::Session;
+use crate::transport::session::NewDeserApiSession as Session;
 use crate::utils::test_utils::unique_keyspace_name;
 use crate::SessionBuilder;
 use bigdecimal::BigDecimal;
 use chrono::{Duration, NaiveDate};
 use num_bigint::BigInt;
+use scylla_cql::types::deserialize::value::DeserializeCql;
 use std::cmp::PartialEq;
 use std::env;
 use std::fmt::Debug;
@@ -25,7 +25,11 @@ async fn init_test(table_name: &str, type_name: &str) -> Session {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
 
     println!("Connecting to {} ...", uri);
-    let session: Session = SessionBuilder::new().known_node(uri).build().await.unwrap();
+    let session: Session = SessionBuilder::new()
+        .known_node(uri)
+        .build_new_api()
+        .await
+        .unwrap();
     let ks = unique_keyspace_name();
 
     session
@@ -70,7 +74,7 @@ async fn init_test(table_name: &str, type_name: &str) -> Session {
 // Expected values and bound values are computed using T::from_str
 async fn run_tests<T>(tests: &[&str], type_name: &str)
 where
-    T: Value + FromCqlVal<CqlValue> + FromStr + Debug + Clone + PartialEq,
+    T: Value + for<'r> DeserializeCql<'r, Target = T> + FromStr + Debug + Clone + PartialEq,
 {
     let session: Session = init_test(type_name, type_name).await;
     session.await_schema_agreement().await.unwrap();
@@ -95,7 +99,7 @@ where
             .query(select_values, &[])
             .await
             .unwrap()
-            .rows_typed::<(T,)>()
+            .rows::<(T,)>()
             .unwrap()
             .map(Result::unwrap)
             .map(|row| row.0)
@@ -184,7 +188,7 @@ async fn test_counter() {
             .query(select_values, (i as i32,))
             .await
             .unwrap()
-            .rows_typed::<(Counter,)>()
+            .rows::<(Counter,)>()
             .unwrap()
             .map(Result::unwrap)
             .map(|row| row.0)
@@ -263,7 +267,7 @@ async fn test_naive_date() {
             .query("SELECT val from naive_date", &[])
             .await
             .unwrap()
-            .rows_typed::<(NaiveDate,)>()
+            .rows::<(NaiveDate,)>()
             .unwrap()
             .next()
             .unwrap()
@@ -286,7 +290,7 @@ async fn test_naive_date() {
                 .query("SELECT val from naive_date", &[])
                 .await
                 .unwrap()
-                .single_row_typed::<(NaiveDate,)>()
+                .single_row::<(NaiveDate,)>()
                 .unwrap();
             assert_eq!(read_date, *naive_date);
         }
@@ -341,7 +345,7 @@ async fn test_date() {
             .query("SELECT val from date_tests", &[])
             .await
             .unwrap()
-            .single_row_typed::<(Date,)>()
+            .single_row::<(Date,)>()
             .unwrap();
 
         assert_eq!(read_date, *date);
@@ -383,7 +387,7 @@ async fn test_time() {
             .query("SELECT val from time_tests", &[])
             .await
             .unwrap()
-            .single_row_typed::<(Duration,)>()
+            .single_row::<(Duration,)>()
             .unwrap();
 
         assert_eq!(read_time, *time_duration);
@@ -401,7 +405,7 @@ async fn test_time() {
             .query("SELECT val from time_tests", &[])
             .await
             .unwrap()
-            .single_row_typed::<(Duration,)>()
+            .single_row::<(Duration,)>()
             .unwrap();
 
         assert_eq!(read_time, *time_duration);
@@ -479,7 +483,7 @@ async fn test_timestamp() {
             .query("SELECT val from timestamp_tests", &[])
             .await
             .unwrap()
-            .single_row_typed::<(Duration,)>()
+            .single_row::<(Duration,)>()
             .unwrap();
 
         assert_eq!(read_timestamp, *timestamp_duration);
@@ -497,7 +501,7 @@ async fn test_timestamp() {
             .query("SELECT val from timestamp_tests", &[])
             .await
             .unwrap()
-            .single_row_typed::<(Duration,)>()
+            .single_row::<(Duration,)>()
             .unwrap();
 
         assert_eq!(read_timestamp, *timestamp_duration);
@@ -547,7 +551,7 @@ async fn test_timeuuid() {
             .query("SELECT val from timeuuid_tests", &[])
             .await
             .unwrap()
-            .single_row_typed::<(Uuid,)>()
+            .single_row::<(Uuid,)>()
             .unwrap();
 
         assert_eq!(read_timeuuid.as_bytes(), timeuuid_bytes);
@@ -566,7 +570,7 @@ async fn test_timeuuid() {
             .query("SELECT val from timeuuid_tests", &[])
             .await
             .unwrap()
-            .single_row_typed::<(Uuid,)>()
+            .single_row::<(Uuid,)>()
             .unwrap();
 
         assert_eq!(read_timeuuid.as_bytes(), timeuuid_bytes);
@@ -631,7 +635,7 @@ async fn test_inet() {
             .query("SELECT val from inet_tests WHERE id = 0", &[])
             .await
             .unwrap()
-            .single_row_typed::<(IpAddr,)>()
+            .single_row::<(IpAddr,)>()
             .unwrap();
 
         assert_eq!(read_inet, *inet);
@@ -646,7 +650,7 @@ async fn test_inet() {
             .query("SELECT val from inet_tests WHERE id = 0", &[])
             .await
             .unwrap()
-            .single_row_typed::<(IpAddr,)>()
+            .single_row::<(IpAddr,)>()
             .unwrap();
 
         assert_eq!(read_inet, *inet);
@@ -696,7 +700,7 @@ async fn test_blob() {
             .query("SELECT val from blob_tests WHERE id = 0", &[])
             .await
             .unwrap()
-            .single_row_typed::<(Vec<u8>,)>()
+            .single_row::<(Vec<u8>,)>()
             .unwrap();
 
         assert_eq!(read_blob, *blob);
@@ -711,7 +715,7 @@ async fn test_blob() {
             .query("SELECT val from blob_tests WHERE id = 0", &[])
             .await
             .unwrap()
-            .single_row_typed::<(Vec<u8>,)>()
+            .single_row::<(Vec<u8>,)>()
             .unwrap();
 
         assert_eq!(read_blob, *blob);
@@ -726,7 +730,11 @@ async fn test_udt_after_schema_update() {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
 
     println!("Connecting to {} ...", uri);
-    let session: Session = SessionBuilder::new().known_node(uri).build().await.unwrap();
+    let session: Session = SessionBuilder::new()
+        .known_node(uri)
+        .build_new_api()
+        .await
+        .unwrap();
     let ks = unique_keyspace_name();
 
     session
@@ -800,6 +808,8 @@ async fn test_udt_after_schema_update() {
         .query(format!("SELECT val from {} WHERE id = 0", table_name), &[])
         .await
         .unwrap()
+        .into_legacy_result()
+        .unwrap()
         .single_row_typed::<(UdtV1,)>()
         .unwrap();
 
@@ -816,6 +826,8 @@ async fn test_udt_after_schema_update() {
     let (read_udt,): (UdtV1,) = session
         .query(format!("SELECT val from {} WHERE id = 0", table_name), &[])
         .await
+        .unwrap()
+        .into_legacy_result()
         .unwrap()
         .single_row_typed::<(UdtV1,)>()
         .unwrap();
@@ -837,6 +849,8 @@ async fn test_udt_after_schema_update() {
     let (read_udt,): (UdtV2,) = session
         .query(format!("SELECT val from {} WHERE id = 0", table_name), &[])
         .await
+        .unwrap()
+        .into_legacy_result()
         .unwrap()
         .single_row_typed::<(UdtV2,)>()
         .unwrap();
@@ -867,7 +881,7 @@ async fn test_empty() {
         .query("SELECT val FROM empty_tests WHERE id = 0", ())
         .await
         .unwrap()
-        .first_row_typed::<(CqlValue,)>()
+        .first_row::<(CqlValue,)>()
         .unwrap();
 
     assert_eq!(empty, CqlValue::Empty);
@@ -884,7 +898,7 @@ async fn test_empty() {
         .query("SELECT val FROM empty_tests WHERE id = 1", ())
         .await
         .unwrap()
-        .first_row_typed::<(CqlValue,)>()
+        .first_row::<(CqlValue,)>()
         .unwrap();
 
     assert_eq!(empty, CqlValue::Empty);
