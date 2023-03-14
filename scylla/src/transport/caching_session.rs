@@ -4,14 +4,20 @@ use crate::prepared_statement::PreparedStatement;
 use crate::query::Query;
 use crate::transport::errors::QueryError;
 use crate::transport::iterator::LegacyRowIterator;
+use crate::transport::legacy_query_result::LegacyQueryResult;
 use crate::transport::partitioner::PartitionerName;
-use crate::{LegacyQueryResult, Session};
+use crate::transport::query_result::QueryResult;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::future::try_join_all;
 use scylla_cql::frame::response::result::PreparedMetadata;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
+
+use super::iterator::RawIterator;
+use super::session::{
+    CurrentDeserializationApi, DeserializationApiKind, GenericSession, LegacyDeserializationApi,
+};
 
 /// Contains just the parts of a prepared statement that were returned
 /// from the database. All remaining parts (query string, page size,
@@ -27,11 +33,12 @@ struct RawPreparedStatementData {
 
 /// Provides auto caching while executing queries
 #[derive(Debug)]
-pub struct CachingSession<S = RandomState>
+pub struct GenericCachingSession<DeserializationApi, S = RandomState>
 where
     S: Clone + BuildHasher,
+    DeserializationApi: DeserializationApiKind,
 {
-    session: Session,
+    session: GenericSession<DeserializationApi>,
     /// The prepared statement cache size
     /// If a prepared statement is added while the limit is reached, the oldest prepared statement
     /// is removed from the cache
@@ -39,11 +46,16 @@ where
     cache: DashMap<String, RawPreparedStatementData, S>,
 }
 
-impl<S> CachingSession<S>
+pub type NewDeserializationCachingSession<S = RandomState> =
+    GenericCachingSession<CurrentDeserializationApi, S>;
+pub type CachingSession<S = RandomState> = GenericCachingSession<LegacyDeserializationApi, S>;
+
+impl<DeserApi, S> GenericCachingSession<DeserApi, S>
 where
     S: Default + BuildHasher + Clone,
+    DeserApi: DeserializationApiKind,
 {
-    pub fn from(session: Session, cache_size: usize) -> Self {
+    pub fn from(session: GenericSession<DeserApi>, cache_size: usize) -> Self {
         Self {
             session,
             max_capacity: cache_size,
@@ -52,20 +64,91 @@ where
     }
 }
 
-impl<S> CachingSession<S>
+impl<DeserApi, S> GenericCachingSession<DeserApi, S>
 where
     S: BuildHasher + Clone,
+    DeserApi: DeserializationApiKind,
 {
     /// Builds a [`CachingSession`] from a [`Session`], a cache size, and a [`BuildHasher`].,
     /// using a customer hasher.
-    pub fn with_hasher(session: Session, cache_size: usize, hasher: S) -> Self {
+    pub fn with_hasher(session: GenericSession<DeserApi>, cache_size: usize, hasher: S) -> Self {
         Self {
             session,
             max_capacity: cache_size,
             cache: DashMap::with_hasher(hasher),
         }
     }
+}
 
+impl<S> GenericCachingSession<CurrentDeserializationApi, S>
+where
+    S: BuildHasher + Clone,
+{
+    /// Does the same thing as [`Session::execute`] but uses the prepared statement cache
+    pub async fn execute(
+        &self,
+        query: impl Into<Query>,
+        values: impl ValueList,
+    ) -> Result<QueryResult, QueryError> {
+        let query = query.into();
+        let prepared = self.add_prepared_statement_owned(query).await?;
+        let values = values.serialized()?;
+        self.session.execute(&prepared, values.clone()).await
+    }
+
+    /// Does the same thing as [`Session::execute_iter`] but uses the prepared statement cache
+    pub async fn execute_iter(
+        &self,
+        query: impl Into<Query>,
+        values: impl ValueList,
+    ) -> Result<RawIterator, QueryError> {
+        let query = query.into();
+        let prepared = self.add_prepared_statement_owned(query).await?;
+        let values = values.serialized()?;
+        self.session.execute_iter(prepared, values.clone()).await
+    }
+
+    /// Does the same thing as [`Session::execute_paged`] but uses the prepared statement cache
+    pub async fn execute_paged(
+        &self,
+        query: impl Into<Query>,
+        values: impl ValueList,
+        paging_state: Option<Bytes>,
+    ) -> Result<QueryResult, QueryError> {
+        let query = query.into();
+        let prepared = self.add_prepared_statement_owned(query).await?;
+        let values = values.serialized()?;
+        self.session
+            .execute_paged(&prepared, values.clone(), paging_state.clone())
+            .await
+    }
+
+    /// Does the same thing as [`Session::batch`] but uses the prepared statement cache\
+    /// Prepares batch using CachingSession::prepare_batch if needed and then executes it
+    pub async fn batch(
+        &self,
+        batch: &Batch,
+        values: impl BatchValues,
+    ) -> Result<QueryResult, QueryError> {
+        let all_prepared: bool = batch
+            .statements
+            .iter()
+            .all(|stmt| matches!(stmt, BatchStatement::PreparedStatement(_)));
+
+        if all_prepared {
+            self.session.batch(batch, &values).await
+        } else {
+            let prepared_batch: Batch = self.prepare_batch(batch).await?;
+
+            self.session.batch(&prepared_batch, &values).await
+        }
+    }
+}
+
+impl<S> GenericCachingSession<LegacyDeserializationApi, S>
+where
+    S: BuildHasher + Clone,
+{
     /// Does the same thing as [`Session::execute`] but uses the prepared statement cache
     pub async fn execute(
         &self,
@@ -125,7 +208,13 @@ where
             self.session.batch(&prepared_batch, &values).await
         }
     }
+}
 
+impl<DeserApi, S> GenericCachingSession<DeserApi, S>
+where
+    S: BuildHasher + Clone,
+    DeserApi: DeserializationApiKind,
+{
     /// Prepares all statements within the batch and returns a new batch where every
     /// statement is prepared.
     /// Uses the prepared statements cache.
@@ -209,7 +298,7 @@ where
         self.max_capacity
     }
 
-    pub fn get_session(&self) -> &Session {
+    pub fn get_session(&self) -> &GenericSession<DeserApi> {
         &self.session
     }
 }
