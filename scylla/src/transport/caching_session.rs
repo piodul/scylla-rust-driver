@@ -5,7 +5,7 @@ use crate::query::Query;
 use crate::transport::errors::QueryError;
 use crate::transport::iterator::LegacyRowIterator;
 use crate::transport::partitioner::PartitionerName;
-use crate::{LegacyQueryResult, Session};
+use crate::{LegacyQueryResult, LegacySession};
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::future::try_join_all;
@@ -31,7 +31,7 @@ pub struct CachingSession<S = RandomState>
 where
     S: Clone + BuildHasher,
 {
-    session: Session,
+    session: LegacySession,
     /// The prepared statement cache size
     /// If a prepared statement is added while the limit is reached, the oldest prepared statement
     /// is removed from the cache
@@ -43,7 +43,7 @@ impl<S> CachingSession<S>
 where
     S: Default + BuildHasher + Clone,
 {
-    pub fn from(session: Session, cache_size: usize) -> Self {
+    pub fn from(session: LegacySession, cache_size: usize) -> Self {
         Self {
             session,
             max_capacity: cache_size,
@@ -58,7 +58,7 @@ where
 {
     /// Builds a [`CachingSession`] from a [`Session`], a cache size, and a [`BuildHasher`].,
     /// using a customer hasher.
-    pub fn with_hasher(session: Session, cache_size: usize, hasher: S) -> Self {
+    pub fn with_hasher(session: LegacySession, cache_size: usize, hasher: S) -> Self {
         Self {
             session,
             max_capacity: cache_size,
@@ -209,7 +209,7 @@ where
         self.max_capacity
     }
 
-    pub fn get_session(&self) -> &Session {
+    pub fn get_session(&self) -> &LegacySession {
         &self.session
     }
 }
@@ -222,12 +222,12 @@ mod tests {
     use crate::{
         batch::{Batch, BatchStatement},
         prepared_statement::PreparedStatement,
-        CachingSession, Session, SessionBuilder,
+        CachingSession, LegacySession, SessionBuilder,
     };
     use futures::TryStreamExt;
     use std::collections::BTreeSet;
 
-    async fn new_for_test() -> Session {
+    async fn new_for_test() -> LegacySession {
         let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
         let session = SessionBuilder::new()
             .known_node(uri)

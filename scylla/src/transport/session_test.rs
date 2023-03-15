@@ -18,7 +18,7 @@ use crate::utils::test_utils::{supports_feature, unique_keyspace_name};
 use crate::CachingSession;
 use crate::ExecutionProfile;
 use crate::LegacyQueryResult;
-use crate::{Session, SessionBuilder};
+use crate::{LegacySession, SessionBuilder};
 use assert_matches::assert_matches;
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt, TryStreamExt};
@@ -582,7 +582,7 @@ async fn test_use_keyspace() {
     ));
 
     // Make sure that use_keyspace on SessionBuiler works
-    let session2: Session = SessionBuilder::new()
+    let session2: LegacySession = SessionBuilder::new()
         .known_node(uri)
         .use_keyspace(ks.clone(), false)
         .build()
@@ -830,7 +830,7 @@ async fn test_tracing() {
     test_tracing_batch(&session, ks.clone()).await;
 }
 
-async fn test_tracing_query(session: &Session, ks: String) {
+async fn test_tracing_query(session: &LegacySession, ks: String) {
     // A query without tracing enabled has no tracing uuid in result
     let untraced_query: Query = Query::new(format!("SELECT * FROM {}.tab", ks));
     let untraced_query_result: LegacyQueryResult =
@@ -849,7 +849,7 @@ async fn test_tracing_query(session: &Session, ks: String) {
     assert_in_tracing_table(session, traced_query_result.tracing_id.unwrap()).await;
 }
 
-async fn test_tracing_execute(session: &Session, ks: String) {
+async fn test_tracing_execute(session: &LegacySession, ks: String) {
     // Executing a prepared statement without tracing enabled has no tracing uuid in result
     let untraced_prepared = session
         .prepare(format!("SELECT * FROM {}.tab", ks))
@@ -877,7 +877,7 @@ async fn test_tracing_execute(session: &Session, ks: String) {
     assert_in_tracing_table(session, traced_prepared_result.tracing_id.unwrap()).await;
 }
 
-async fn test_tracing_prepare(session: &Session, ks: String) {
+async fn test_tracing_prepare(session: &LegacySession, ks: String) {
     // Preparing a statement without tracing enabled has no tracing uuids in result
     let untraced_prepared = session
         .prepare(format!("SELECT * FROM {}.tab", ks))
@@ -899,7 +899,7 @@ async fn test_tracing_prepare(session: &Session, ks: String) {
     }
 }
 
-async fn test_get_tracing_info(session: &Session, ks: String) {
+async fn test_get_tracing_info(session: &LegacySession, ks: String) {
     // A query with tracing enabled has a tracing uuid in result
     let mut traced_query: Query = Query::new(format!("SELECT * FROM {}.tab", ks));
     traced_query.config.tracing = true;
@@ -926,7 +926,7 @@ async fn test_get_tracing_info(session: &Session, ks: String) {
     assert!(!tracing_info.nodes().is_empty());
 }
 
-async fn test_tracing_query_iter(session: &Session, ks: String) {
+async fn test_tracing_query_iter(session: &LegacySession, ks: String) {
     // A query without tracing enabled has no tracing ids
     let untraced_query: Query = Query::new(format!("SELECT * FROM {}.tab", ks));
 
@@ -961,7 +961,7 @@ async fn test_tracing_query_iter(session: &Session, ks: String) {
     }
 }
 
-async fn test_tracing_execute_iter(session: &Session, ks: String) {
+async fn test_tracing_execute_iter(session: &LegacySession, ks: String) {
     // A prepared statement without tracing enabled has no tracing ids
     let untraced_prepared = session
         .prepare(format!("SELECT * FROM {}.tab", ks))
@@ -1002,7 +1002,7 @@ async fn test_tracing_execute_iter(session: &Session, ks: String) {
     }
 }
 
-async fn test_tracing_batch(session: &Session, ks: String) {
+async fn test_tracing_batch(session: &LegacySession, ks: String) {
     // A batch without tracing enabled has no tracing id
     let mut untraced_batch: Batch = Default::default();
     untraced_batch.append_statement(&format!("INSERT INTO {}.tab (a) VALUES('a')", ks)[..]);
@@ -1022,7 +1022,7 @@ async fn test_tracing_batch(session: &Session, ks: String) {
     assert_in_tracing_table(session, traced_batch_result.tracing_id.unwrap()).await;
 }
 
-async fn assert_in_tracing_table(session: &Session, tracing_uuid: Uuid) {
+async fn assert_in_tracing_table(session: &LegacySession, tracing_uuid: Uuid) {
     let mut traces_query = Query::new("SELECT * FROM system_traces.sessions WHERE session_id = ?");
     traces_query.config.consistency = Some(Consistency::One);
 
@@ -1865,7 +1865,7 @@ async fn test_prepared_partitioner() {
     );
 }
 
-async fn rename(session: &Session, rename_str: &str) {
+async fn rename(session: &LegacySession, rename_str: &str) {
     session
         .query(format!("ALTER TABLE tab RENAME {}", rename_str), ())
         .await
@@ -2181,7 +2181,7 @@ async fn test_views_in_schema_info() {
     )
 }
 
-async fn assert_test_batch_table_rows_contain(sess: &Session, expected_rows: &[(i32, i32)]) {
+async fn assert_test_batch_table_rows_contain(sess: &LegacySession, expected_rows: &[(i32, i32)]) {
     let selected_rows: BTreeSet<(i32, i32)> = sess
         .query("SELECT a, b FROM test_batch_table", ())
         .await
@@ -2426,7 +2426,7 @@ async fn test_batch_lwts() {
 }
 
 async fn test_batch_lwts_for_scylla(
-    session: &Session,
+    session: &LegacySession,
     batch: &Batch,
     batch_res: LegacyQueryResult,
 ) {
@@ -2470,7 +2470,7 @@ async fn test_batch_lwts_for_scylla(
 }
 
 async fn test_batch_lwts_for_cassandra(
-    session: &Session,
+    session: &LegacySession,
     batch: &Batch,
     batch_res: LegacyQueryResult,
 ) {

@@ -5,7 +5,7 @@ use crate::frame::value::Counter;
 use crate::frame::value::Value;
 use crate::frame::value::{Date, Time, Timestamp};
 use crate::macros::{FromUserType, IntoUserType};
-use crate::transport::session::Session;
+use crate::transport::session::LegacySession;
 use crate::utils::test_utils::unique_keyspace_name;
 use crate::SessionBuilder;
 use bigdecimal::BigDecimal;
@@ -21,11 +21,11 @@ use uuid::Uuid;
 // Used to prepare a table for test
 // Creates a new keyspace
 // Drops and creates table {table_name} (id int PRIMARY KEY, val {type_name})
-async fn init_test(table_name: &str, type_name: &str) -> Session {
+async fn init_test(table_name: &str, type_name: &str) -> LegacySession {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
 
     println!("Connecting to {} ...", uri);
-    let session: Session = SessionBuilder::new().known_node(uri).build().await.unwrap();
+    let session: LegacySession = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session
@@ -72,7 +72,7 @@ async fn run_tests<T>(tests: &[&str], type_name: &str)
 where
     T: Value + FromCqlVal<CqlValue> + FromStr + Debug + Clone + PartialEq,
 {
-    let session: Session = init_test(type_name, type_name).await;
+    let session: LegacySession = init_test(type_name, type_name).await;
     session.await_schema_agreement().await.unwrap();
 
     for test in tests.iter() {
@@ -169,7 +169,7 @@ async fn test_counter() {
 
     // Can't use run_tests, because counters are special and can't be inserted
     let type_name = "counter";
-    let session: Session = init_test(type_name, type_name).await;
+    let session: LegacySession = init_test(type_name, type_name).await;
 
     for (i, test) in tests.iter().enumerate() {
         let update_bound_value = format!("UPDATE {} SET val = val + ? WHERE id = ?", type_name);
@@ -197,7 +197,7 @@ async fn test_counter() {
 
 #[tokio::test]
 async fn test_naive_date() {
-    let session: Session = init_test("naive_date", "date").await;
+    let session: LegacySession = init_test("naive_date", "date").await;
 
     let min_naive_date: NaiveDate = NaiveDate::MIN;
     assert_eq!(
@@ -314,7 +314,7 @@ async fn test_naive_date() {
 async fn test_date() {
     // Tests value::Date which allows to insert dates outside NaiveDate range
 
-    let session: Session = init_test("date_tests", "date").await;
+    let session: LegacySession = init_test("date_tests", "date").await;
 
     let tests = [
         ("1970-01-01", Date(2_u32.pow(31))),
@@ -353,7 +353,7 @@ async fn test_time() {
     // Time is an i64 - nanoseconds since midnight
     // in range 0..=86399999999999
 
-    let session: Session = init_test("time_tests", "time").await;
+    let session: LegacySession = init_test("time_tests", "time").await;
 
     let max_time: i64 = 24 * 60 * 60 * 1_000_000_000 - 1;
     assert_eq!(max_time, 86399999999999);
@@ -435,7 +435,7 @@ async fn test_time() {
 
 #[tokio::test]
 async fn test_timestamp() {
-    let session: Session = init_test("timestamp_tests", "timestamp").await;
+    let session: LegacySession = init_test("timestamp_tests", "timestamp").await;
 
     //let epoch_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
 
@@ -506,7 +506,7 @@ async fn test_timestamp() {
 
 #[tokio::test]
 async fn test_timeuuid() {
-    let session: Session = init_test("timeuuid_tests", "timeuuid").await;
+    let session: LegacySession = init_test("timeuuid_tests", "timeuuid").await;
 
     // A few random timeuuids generated manually
     let tests = [
@@ -575,7 +575,7 @@ async fn test_timeuuid() {
 
 #[tokio::test]
 async fn test_inet() {
-    let session: Session = init_test("inet_tests", "inet").await;
+    let session: LegacySession = init_test("inet_tests", "inet").await;
 
     let tests = [
         ("0.0.0.0", IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))),
@@ -655,7 +655,7 @@ async fn test_inet() {
 
 #[tokio::test]
 async fn test_blob() {
-    let session: Session = init_test("blob_tests", "blob").await;
+    let session: LegacySession = init_test("blob_tests", "blob").await;
 
     let long_blob: Vec<u8> = vec![0x11; 1234];
     let mut long_blob_str: String = "0x".to_string();
@@ -726,7 +726,7 @@ async fn test_udt_after_schema_update() {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
 
     println!("Connecting to {} ...", uri);
-    let session: Session = SessionBuilder::new().known_node(uri).build().await.unwrap();
+    let session: LegacySession = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let ks = unique_keyspace_name();
 
     session
@@ -853,7 +853,7 @@ async fn test_udt_after_schema_update() {
 
 #[tokio::test]
 async fn test_empty() {
-    let session: Session = init_test("empty_tests", "int").await;
+    let session: LegacySession = init_test("empty_tests", "int").await;
 
     session
         .query(
