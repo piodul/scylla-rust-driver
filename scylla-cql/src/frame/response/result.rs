@@ -3,6 +3,10 @@ use crate::frame::response::event::SchemaChangeEvent;
 use crate::frame::types::vint_decode;
 use crate::frame::value::{Counter, CqlDuration};
 use crate::frame::{frame_errors::ParseError, types};
+use crate::types::deserialize::row::{
+    ColumnIterator, DeserializeRow, RowIterator, TypedRowIterator,
+};
+use crate::types::deserialize::FrameSlice;
 use bigdecimal::BigDecimal;
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, Bytes};
@@ -370,6 +374,112 @@ impl Row {
     /// Allows converting Row into tuple of rust types or custom struct deriving FromRow
     pub fn into_typed<RowT: FromRow>(self) -> StdResult<RowT, FromRowError> {
         RowT::from_row(self)
+    }
+}
+
+/// Rows response, in partially serialized form.
+// TODO: We could provide ResultMetadata in a similar, lazily
+// deserialized form - now it can be a source of allocations
+#[derive(Debug, Default)]
+pub struct RawRows {
+    // TODO: Better encapsulation
+    metadata: ResultMetadata,
+    rows_count: usize,
+    raw_rows: Bytes,
+}
+
+impl RawRows {
+    #[inline]
+    pub fn metadata(&self) -> &ResultMetadata {
+        &self.metadata
+    }
+
+    #[inline]
+    pub fn into_metadata(self) -> ResultMetadata {
+        self.metadata
+    }
+
+    #[inline]
+    pub fn rows_count(&self) -> usize {
+        self.rows_count
+    }
+
+    /// Creates a typed iterator over the rows that lazily deserializes
+    /// rows in the result.
+    ///
+    /// Returns Err if the schema of returned result doesn't match R.
+    #[inline]
+    pub fn rows_iter<'r, R: DeserializeRow<'r>>(
+        &'r self,
+    ) -> StdResult<TypedRowIterator<'r, R>, ParseError> {
+        let slice = FrameSlice::new(&self.raw_rows);
+        let raw = RowIterator::new(self.rows_count, &self.metadata.col_specs, slice);
+        TypedRowIterator::new(raw)
+    }
+
+    pub fn into_legacy_rows(self) -> StdResult<Rows, ParseError> {
+        let rows = self.rows_iter::<Row>()?.collect::<StdResult<_, _>>()?;
+        Ok(Rows {
+            metadata: self.metadata,
+            rows_count: self.rows_count,
+            rows,
+        })
+    }
+}
+
+// Technically not an iterator because it returns items that borrow from it,
+// and the std Iterator interface does not allow for that.
+#[derive(Debug)]
+pub struct RawRowsLendingIterator {
+    metadata: ResultMetadata,
+    remaining: usize,
+    at: usize,
+    raw_rows: Bytes,
+}
+
+impl RawRowsLendingIterator {
+    #[inline]
+    pub fn new(raw_rows: RawRows) -> Self {
+        Self {
+            metadata: raw_rows.metadata,
+            remaining: raw_rows.rows_count,
+            at: 0,
+            raw_rows: raw_rows.raw_rows,
+        }
+    }
+
+    #[inline]
+    pub fn next<'r>(&'r mut self) -> Option<StdResult<ColumnIterator<'r>, ParseError>> {
+        self.remaining = self.remaining.checked_sub(1)?;
+
+        let mut mem = &self.raw_rows[self.at..];
+
+        // Skip the row here, manually
+        for _ in 0..self.metadata.col_specs.len() {
+            if let Err(err) = types::read_bytes_opt(&mut mem) {
+                return Some(Err(err));
+            }
+        }
+
+        let slice = FrameSlice::new_subslice(&self.raw_rows[self.at..], &self.raw_rows);
+        let iter = ColumnIterator::new(&self.metadata.col_specs, slice);
+        self.at = self.raw_rows.len() - mem.len();
+        Some(Ok(iter))
+    }
+
+    #[inline]
+    pub fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.remaining))
+    }
+
+    #[inline]
+    pub fn metadata(&self) -> &ResultMetadata {
+        &self.metadata
+    }
+
+    #[inline]
+    pub fn rows_remining(&self) -> usize {
+        self.remaining
     }
 }
 
