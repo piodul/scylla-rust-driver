@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use super::errors::QueryError;
 use super::execution_profile::ExecutionProfileInner;
 use crate::cql_to_rust::{FromRow, FromRowError};
-use crate::Session;
+use crate::LegacySession;
 
 use crate::frame::types::LegacyConsistency;
 use crate::frame::{
@@ -616,7 +616,7 @@ where
                     .into_non_error_query_response();
 
             let elapsed = query_start.elapsed();
-            if Session::should_consider_query_for_latency_measurements(
+            if LegacySession::should_consider_query_for_latency_measurements(
                 self.load_balancer(),
                 &query_response,
             ) {
