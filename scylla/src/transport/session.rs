@@ -18,6 +18,7 @@ pub use scylla_cql::errors::TranslationError;
 use scylla_cql::frame::response::NonErrorResponse;
 use std::collections::HashMap;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -72,6 +73,10 @@ use crate::authentication::AuthenticatorProvider;
 #[cfg(feature = "ssl")]
 use openssl::ssl::SslContext;
 
+mod sealed {
+    pub trait Sealed {}
+}
+
 #[async_trait]
 pub trait AddressTranslator: Send + Sync {
     async fn translate_address(
@@ -113,19 +118,34 @@ impl AddressTranslator for HashMap<&'static str, &'static str> {
     }
 }
 
+pub trait DeserializationApiKind: sealed::Sealed {}
+
+pub enum LegacyDeserializationApi {}
+impl sealed::Sealed for LegacyDeserializationApi {}
+impl DeserializationApiKind for LegacyDeserializationApi {}
+
 /// `Session` manages connections to the cluster and allows to perform queries
-pub struct LegacySession {
+pub struct GenericSession<DeserializationApi>
+where
+    DeserializationApi: DeserializationApiKind,
+{
     cluster: Cluster,
     default_execution_profile_handle: ExecutionProfileHandle,
     schema_agreement_interval: Duration,
     metrics: Arc<Metrics>,
     auto_await_schema_agreement_timeout: Option<Duration>,
     refresh_metadata_on_auto_schema_agreement: bool,
+    _phantom_deser_api: PhantomData<DeserializationApi>,
 }
+
+pub type LegacySession = GenericSession<LegacyDeserializationApi>;
 
 /// This implementation deliberately omits some details from Cluster in order
 /// to avoid cluttering the print with much information of little usability.
-impl std::fmt::Debug for LegacySession {
+impl<DeserApi> std::fmt::Debug for GenericSession<DeserApi>
+where
+    DeserApi: DeserializationApiKind,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
             .field("cluster", &ClusterNeatDebug(&self.cluster))
@@ -395,7 +415,7 @@ impl LegacySession {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn connect(config: SessionConfig) -> Result<LegacySession, NewSessionError> {
+    pub async fn connect(config: SessionConfig) -> Result<Self, NewSessionError> {
         let known_nodes = config.known_nodes;
 
         #[cfg(feature = "cloud")]
@@ -484,7 +504,7 @@ impl LegacySession {
 
         let default_execution_profile_handle = config.default_execution_profile_handle;
 
-        let session = LegacySession {
+        let session = Self {
             cluster,
             default_execution_profile_handle,
             schema_agreement_interval: config.schema_agreement_interval,
@@ -492,6 +512,7 @@ impl LegacySession {
             auto_await_schema_agreement_timeout: config.auto_await_schema_agreement_timeout,
             refresh_metadata_on_auto_schema_agreement: config
                 .refresh_metadata_on_auto_schema_agreement,
+            _phantom_deser_api: PhantomData,
         };
 
         if let Some(keyspace_name) = config.used_keyspace {
