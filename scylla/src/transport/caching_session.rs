@@ -231,7 +231,7 @@ mod tests {
         let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
         let session = SessionBuilder::new()
             .known_node(uri)
-            .build()
+            .build_legacy()
             .await
             .expect("Could not create session");
         let ks = unique_keyspace_name();

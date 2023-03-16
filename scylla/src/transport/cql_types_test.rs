@@ -25,7 +25,11 @@ async fn init_test(table_name: &str, type_name: &str) -> LegacySession {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
 
     println!("Connecting to {} ...", uri);
-    let session: LegacySession = SessionBuilder::new().known_node(uri).build().await.unwrap();
+    let session: LegacySession = SessionBuilder::new()
+        .known_node(uri)
+        .build_legacy()
+        .await
+        .unwrap();
     let ks = unique_keyspace_name();
 
     session
@@ -726,7 +730,11 @@ async fn test_udt_after_schema_update() {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
 
     println!("Connecting to {} ...", uri);
-    let session: LegacySession = SessionBuilder::new().known_node(uri).build().await.unwrap();
+    let session: LegacySession = SessionBuilder::new()
+        .known_node(uri)
+        .build_legacy()
+        .await
+        .unwrap();
     let ks = unique_keyspace_name();
 
     session

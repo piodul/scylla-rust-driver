@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
     info!("Connecting to {}", uri);
 
-    let session: LegacySession = SessionBuilder::new().known_node(uri).build().await?;
+    let session: LegacySession = SessionBuilder::new().known_node(uri).build_legacy().await?;
     session.query("CREATE KEYSPACE IF NOT EXISTS ks WITH REPLICATION = {'class' : 'SimpleStrategy', 'replication_factor' : 1}", &[]).await?;
 
     // This query should generate a warning message
