@@ -8,7 +8,11 @@ use crate::{LegacySession, SessionBuilder};
 #[tokio::test]
 async fn test_cqlvalue_udt() {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session: LegacySession = SessionBuilder::new().known_node(uri).build().await.unwrap();
+    let session: LegacySession = SessionBuilder::new()
+        .known_node(uri)
+        .build_legacy()
+        .await
+        .unwrap();
     let ks = unique_keyspace_name();
     session
         .query(
@@ -73,7 +77,11 @@ async fn test_cqlvalue_udt() {
 #[tokio::test]
 async fn test_cqlvalue_duration() {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    let session: LegacySession = SessionBuilder::new().known_node(uri).build().await.unwrap();
+    let session: LegacySession = SessionBuilder::new()
+        .known_node(uri)
+        .build_legacy()
+        .await
+        .unwrap();
 
     let ks = unique_keyspace_name();
     session

@@ -7,7 +7,11 @@ async fn main() {
 
     println!("Connecting to {} ...", uri);
 
-    let session: LegacySession = SessionBuilder::new().known_node(uri).build().await.unwrap();
+    let session: LegacySession = SessionBuilder::new()
+        .known_node(uri)
+        .build_legacy()
+        .await
+        .unwrap();
 
     session.query("CREATE KEYSPACE IF NOT EXISTS ks WITH REPLICATION = {'class' : 'SimpleStrategy', 'replication_factor' : 1}", &[]).await.unwrap();
 

@@ -25,7 +25,7 @@
 //!    let session: LegacySession = SessionBuilder::new()
 //!         .known_node("127.0.0.1:9042")
 //!         .known_node("1.2.3.4:9876")
-//!         .build()
+//!         .build_legacy()
 //!         .await?;
 //!
 //!    Ok(())
@@ -129,7 +129,7 @@ pub use transport::caching_session::CachingSession;
 pub use transport::execution_profile::ExecutionProfile;
 pub use transport::legacy_query_result::LegacyQueryResult;
 pub use transport::query_result::QueryResult;
-pub use transport::session::{IntoTypedRows, LegacySession, SessionConfig};
+pub use transport::session::{IntoTypedRows, LegacySession, Session, SessionConfig};
 pub use transport::session_builder::SessionBuilder;
 
 #[cfg(feature = "cloud")]

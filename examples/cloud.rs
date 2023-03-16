@@ -9,7 +9,7 @@ async fn main() -> Result<()> {
 
     let session = CloudSessionBuilder::new(Path::new("examples/config_data.yaml"))
         .unwrap()
-        .build()
+        .build_legacy()
         .await
         .unwrap();
 
