@@ -125,6 +125,10 @@ impl AddressTranslator for HashMap<&'static str, &'static str> {
 
 pub trait DeserializationApiKind: sealed::Sealed {}
 
+pub enum CurrentDeserializationApi {}
+impl sealed::Sealed for CurrentDeserializationApi {}
+impl DeserializationApiKind for CurrentDeserializationApi {}
+
 pub enum LegacyDeserializationApi {}
 impl sealed::Sealed for LegacyDeserializationApi {}
 impl DeserializationApiKind for LegacyDeserializationApi {}
@@ -144,6 +148,7 @@ where
     _phantom_deser_api: PhantomData<DeserializationApi>,
 }
 
+pub type Session = GenericSession<CurrentDeserializationApi>;
 pub type LegacySession = GenericSession<LegacyDeserializationApi>;
 
 /// This implementation deliberately omits some details from Cluster in order
