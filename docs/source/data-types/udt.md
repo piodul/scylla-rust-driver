@@ -65,3 +65,7 @@ if let Some(rows) = session.query("SELECT a FROM keyspace.table", &[]).await?.ro
 # Ok(())
 # }
 ```
+
+## New serialization
+
+In 0.11, new traits have been introduced for serialization. 

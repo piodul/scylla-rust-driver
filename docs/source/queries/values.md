@@ -5,14 +5,13 @@ Each `?` in query text will be filled with the matching value.
 
 > **Never** pass values by adding strings, this could lead to [SQL Injection](https://en.wikipedia.org/wiki/SQL_injection)
 
-Each list of values to send in a query must implement the trait `ValueList`.\
-By default this can be a slice `&[]`, a tuple `()` (max 16 elements) of values to send,
-or a custom struct which derives from `ValueList`.
+A list of values can be anything that implements the `SerializeRow` trait.
+See the API docs for the `SerializeRow` for a complete list of types that implement that trait.
 
 A few examples:
 ```rust
 # extern crate scylla;
-# use scylla::{Session, ValueList, frame::response::result::CqlValue};
+# use scylla::{Session, SerializeRow, frame::response::result::CqlValue};
 # use std::error::Error;
 # use std::collections::HashMap;
 # async fn check_only_compiles(session: &Session) -> Result<(), Box<dyn Error>> {
@@ -33,20 +32,22 @@ session
     .await?;
 
 // Sending an integer and a string using a named struct.
-// The values will be passed in the order from the struct definition
-#[derive(ValueList)]
+#[derive(SerializeRow)]
 struct IntString {
-    first_col: i32,
-    second_col: String,
+    a: i32,
+    b: String,
 }
 
 let int_string = IntString {
-    first_col: 42_i32,
-    second_col: "hello".to_owned(),
+    a: 42_i32,
+    b: "hello".to_owned(),
 };
 
+// Note that the order of the fields does not have to correspond to the order
+// of the columns in the query. The field "a" will be matched with the bind
+// marker for column "a", and field "b" to column "b".
 session
-    .query("INSERT INTO ks.tab (a, b) VALUES(?, ?)", int_string)
+    .query("INSERT INTO ks.tab (b, a) VALUES(?, ?)", int_string)
     .await?;
 
 // Sending a single value as a tuple requires a trailing coma (Rust syntax):
@@ -57,7 +58,10 @@ session
     .query("INSERT INTO ks.tab (a, b) VALUES(?, ?)", &(&2_i32, &"Some text"))
     .await?;
 
-// A map of named values can also be provided:
+// Values can also be passed via a HashMap. Like in the case of struct fields,
+// entries of the map are also matched by name. In this example, though,
+// we are using named bind markers, so instead of using the column names,
+// values are matched to the bind marker names.
 let mut vals: HashMap<&str, CqlValue> = HashMap::new();
 vals.insert("avalue", CqlValue::Text("hello".to_string()));
 vals.insert("bvalue", CqlValue::Int(17));
@@ -119,3 +123,11 @@ See the [issue](https://issues.apache.org/jira/browse/CASSANDRA-7304) for more i
 
 ### Other data types
 See [Data Types](../data-types/data-types.md) for instructions on sending other data types
+
+## Legacy `ValueList` trait
+
+The `SerializeRow` trait was introduced in 0.11 and took its role from the `ValueList` trait.
+In order to make migration easier, the legacy `ValueList` is still present in the driver and it's easy to 
+
+Before version 0.11, the trait `ValueList` was used instead of `SerializeRow`.
+The 

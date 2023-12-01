@@ -95,6 +95,9 @@ if let Some(rows) = session.query("SELECT a FROM ks.tab", &[]).await?.rows {
 See [Query result](result.md) for more information about handling query results
 
 ### Performance
+
+Simple statements are a good choice for queries that are sent once or rarely and don't have strict latency requirements.
+
 Simple queries should not be used in places where performance matters.\
 If performance matters use a [Prepared query](prepared.md) instead.
 
