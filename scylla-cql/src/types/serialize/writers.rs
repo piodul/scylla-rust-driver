@@ -184,7 +184,7 @@ impl<'buf> WrittenCellProof<'buf> {
 pub struct CellOverflowError;
 
 /// A row writer backed by a buffer.
-pub struct BufBackedRowWriter<'buf, B> {
+pub struct BufBackedRowWriter<'buf, B: ?Sized> {
     // Buffer that this value should be serialized to.
     buf: &'buf mut B,
 
@@ -192,7 +192,7 @@ pub struct BufBackedRowWriter<'buf, B> {
     value_count: usize,
 }
 
-impl<'buf, B> BufBackedRowWriter<'buf, B> {
+impl<'buf, B: ?Sized> BufBackedRowWriter<'buf, B> {
     /// Creates a new row writer based on an existing Vec.
     ///
     /// The newly created row writer will append data to the end of the vec.
@@ -216,7 +216,7 @@ impl<'buf, B> BufBackedRowWriter<'buf, B> {
 
 impl<'buf, B> RowWriter for BufBackedRowWriter<'buf, B>
 where
-    B: CqlBuffer,
+    B: CqlBuffer + ?Sized,
 {
     type CellWriter<'a> = BufBackedCellWriter<'a, B> where Self: 'a;
 
@@ -228,11 +228,11 @@ where
 }
 
 /// A cell writer backed by a buffer.
-pub struct BufBackedCellWriter<'buf, B> {
+pub struct BufBackedCellWriter<'buf, B: ?Sized> {
     buf: &'buf mut B,
 }
 
-impl<'buf, B> BufBackedCellWriter<'buf, B> {
+impl<'buf, B: ?Sized> BufBackedCellWriter<'buf, B> {
     /// Creates a new cell writer based on an existing Vec.
     ///
     /// The newly created row writer will append data to the end of the vec.
@@ -244,7 +244,7 @@ impl<'buf, B> BufBackedCellWriter<'buf, B> {
 
 impl<'buf, B> CellWriter for BufBackedCellWriter<'buf, B>
 where
-    B: CqlBuffer,
+    B: CqlBuffer + ?Sized,
 {
     type ValueBuilder = BufBackedCellValueBuilder<'buf, B>;
 
@@ -277,7 +277,7 @@ where
 }
 
 /// A cell value builder backed by a buffer.
-pub struct BufBackedCellValueBuilder<'buf, B> {
+pub struct BufBackedCellValueBuilder<'buf, B: ?Sized> {
     // Buffer that this value should be serialized to.
     buf: &'buf mut B,
 
@@ -285,7 +285,7 @@ pub struct BufBackedCellValueBuilder<'buf, B> {
     starting_pos: usize,
 }
 
-impl<'buf, B> BufBackedCellValueBuilder<'buf, B>
+impl<'buf, B: ?Sized> BufBackedCellValueBuilder<'buf, B>
 where
     B: CqlBuffer,
 {
@@ -305,7 +305,7 @@ where
 
 impl<'buf, B> CellValueBuilder for BufBackedCellValueBuilder<'buf, B>
 where
-    B: CqlBuffer,
+    B: CqlBuffer + ?Sized,
 {
     type SubCellWriter<'a> = BufBackedCellWriter<'a, B>
     where
