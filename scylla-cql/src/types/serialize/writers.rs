@@ -83,7 +83,7 @@ pub trait RowWriter {
 /// Dropping this type without calling any of its methods will result
 /// in nothing being written.
 pub trait CellWriter {
-    /// The type of the value builder, returned by the [`CellWriter::set_value`]
+    /// The type of the value builder, returned by the [`CellWriter::into_value_builder`]
     /// method.
     type ValueBuilder: CellValueBuilder<WrittenCellProof = Self::WrittenCellProof>;
 
