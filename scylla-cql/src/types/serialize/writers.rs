@@ -2,6 +2,57 @@
 
 use thiserror::Error;
 
+/// Implements a buffer used to serialize data for a query.
+///
+/// This is a low-level trait. Objects of this type will not be exposed directly
+/// to the users, and users should not try to use its methods directly.
+pub trait CqlBuffer {
+    /// Appends bytes to the end of the buffer.
+    fn extend_from_slice(&mut self, bytes: &[u8]);
+
+    /// Returns the current length of the buffer, in bytes.
+    fn len(&self) -> usize;
+
+    /// Updates an i32 value at a given position in the buffer.
+    ///
+    /// May panic if `pos + 4 > self.len()`.
+    fn update_i32_at(&mut self, pos: usize, v: i32);
+}
+
+impl CqlBuffer for Vec<u8> {
+    #[inline]
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        Vec::<u8>::extend_from_slice(self, bytes)
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        <[u8]>::len(self)
+    }
+
+    #[inline]
+    fn update_i32_at(&mut self, pos: usize, v: i32) {
+        self[pos..pos + 4].copy_from_slice(&v.to_be_bytes());
+    }
+}
+
+impl CqlBuffer for usize {
+    #[inline]
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        *self += bytes.len();
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        *self
+    }
+
+    #[inline]
+    fn update_i32_at(&mut self, _pos: usize, _v: i32) {
+        // Do nothing
+    }
+}
+
 /// An interface that facilitates writing values for a CQL query.
 pub trait RowWriter {
     type CellWriter<'a>: CellWriter
@@ -110,21 +161,21 @@ pub trait CellValueBuilder {
 #[error("CQL cell overflowed the maximum allowed size of 2^31 - 1")]
 pub struct CellOverflowError;
 
-/// A row writer backed by a buffer (vec).
-pub struct BufBackedRowWriter<'buf> {
+/// A row writer backed by a buffer.
+pub struct BufBackedRowWriter<'buf, B> {
     // Buffer that this value should be serialized to.
-    buf: &'buf mut Vec<u8>,
+    buf: &'buf mut B,
 
     // Number of values written so far.
     value_count: usize,
 }
 
-impl<'buf> BufBackedRowWriter<'buf> {
+impl<'buf, B> BufBackedRowWriter<'buf, B> {
     /// Creates a new row writer based on an existing Vec.
     ///
     /// The newly created row writer will append data to the end of the vec.
     #[inline]
-    pub fn new(buf: &'buf mut Vec<u8>) -> Self {
+    pub fn new(buf: &'buf mut B) -> Self {
         Self {
             buf,
             value_count: 0,
@@ -141,8 +192,11 @@ impl<'buf> BufBackedRowWriter<'buf> {
     }
 }
 
-impl<'buf> RowWriter for BufBackedRowWriter<'buf> {
-    type CellWriter<'a> = BufBackedCellWriter<'a> where Self: 'a;
+impl<'buf, B> RowWriter for BufBackedRowWriter<'buf, B>
+where
+    B: CqlBuffer,
+{
+    type CellWriter<'a> = BufBackedCellWriter<'a, B> where Self: 'a;
 
     #[inline]
     fn make_cell_writer(&mut self) -> Self::CellWriter<'_> {
@@ -151,23 +205,26 @@ impl<'buf> RowWriter for BufBackedRowWriter<'buf> {
     }
 }
 
-/// A cell writer backed by a buffer (vec).
-pub struct BufBackedCellWriter<'buf> {
-    buf: &'buf mut Vec<u8>,
+/// A cell writer backed by a buffer.
+pub struct BufBackedCellWriter<'buf, B> {
+    buf: &'buf mut B,
 }
 
-impl<'buf> BufBackedCellWriter<'buf> {
+impl<'buf, B> BufBackedCellWriter<'buf, B> {
     /// Creates a new cell writer based on an existing Vec.
     ///
     /// The newly created row writer will append data to the end of the vec.
     #[inline]
-    pub fn new(buf: &'buf mut Vec<u8>) -> Self {
+    pub fn new(buf: &'buf mut B) -> Self {
         BufBackedCellWriter { buf }
     }
 }
 
-impl<'buf> CellWriter for BufBackedCellWriter<'buf> {
-    type ValueBuilder = BufBackedCellValueBuilder<'buf>;
+impl<'buf, B> CellWriter for BufBackedCellWriter<'buf, B>
+where
+    B: CqlBuffer,
+{
+    type ValueBuilder = BufBackedCellValueBuilder<'buf, B>;
 
     type WrittenCellProof = ();
 
@@ -195,18 +252,21 @@ impl<'buf> CellWriter for BufBackedCellWriter<'buf> {
     }
 }
 
-/// A cell value builder backed by a buffer (vec).
-pub struct BufBackedCellValueBuilder<'buf> {
+/// A cell value builder backed by a buffer.
+pub struct BufBackedCellValueBuilder<'buf, B> {
     // Buffer that this value should be serialized to.
-    buf: &'buf mut Vec<u8>,
+    buf: &'buf mut B,
 
     // Starting position of the value in the buffer.
     starting_pos: usize,
 }
 
-impl<'buf> BufBackedCellValueBuilder<'buf> {
+impl<'buf, B> BufBackedCellValueBuilder<'buf, B>
+where
+    B: CqlBuffer,
+{
     #[inline]
-    fn new(buf: &'buf mut Vec<u8>) -> Self {
+    fn new(buf: &'buf mut B) -> Self {
         // "Length" of a [bytes] frame can either be a non-negative i32,
         // -1 (null) or -1 (not set). Push an invalid value here. It will be
         // overwritten eventually either by set_null, set_unset or Drop.
@@ -219,8 +279,11 @@ impl<'buf> BufBackedCellValueBuilder<'buf> {
     }
 }
 
-impl<'buf> CellValueBuilder for BufBackedCellValueBuilder<'buf> {
-    type SubCellWriter<'a> = BufBackedCellWriter<'a>
+impl<'buf, B> CellValueBuilder for BufBackedCellValueBuilder<'buf, B>
+where
+    B: CqlBuffer,
+{
+    type SubCellWriter<'a> = BufBackedCellWriter<'a, B>
     where
         Self: 'a;
 
@@ -241,8 +304,7 @@ impl<'buf> CellValueBuilder for BufBackedCellValueBuilder<'buf> {
         let value_len: i32 = (self.buf.len() - self.starting_pos - 4)
             .try_into()
             .map_err(|_| CellOverflowError)?;
-        self.buf[self.starting_pos..self.starting_pos + 4]
-            .copy_from_slice(&value_len.to_be_bytes());
+        self.buf.update_i32_at(self.starting_pos, value_len);
         Ok(())
     }
 }
