@@ -214,6 +214,19 @@ impl<'buf, B: ?Sized> BufBackedRowWriter<'buf, B> {
     }
 }
 
+impl<'buf, B> BufBackedRowWriter<'buf, B>
+where
+    B: CqlBuffer,
+{
+    #[inline]
+    pub fn into_dyn(self) -> BufBackedRowWriter<'buf, dyn CqlBuffer> {
+        BufBackedRowWriter {
+            buf: self.buf as &mut _,
+            value_count: self.value_count,
+        }
+    }
+}
+
 impl<'buf, B> RowWriter for BufBackedRowWriter<'buf, B>
 where
     B: CqlBuffer + ?Sized,

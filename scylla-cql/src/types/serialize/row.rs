@@ -57,6 +57,72 @@ pub trait SerializeRow {
     ) -> Result<(), SerializationError>;
 }
 
+pub trait ErasedSerializeRow {
+    fn serialize<'buf>(
+        &self,
+        ctx: &RowSerializationContext<'_>,
+        writer: &mut RowWriter<'buf, dyn CqlBuffer>,
+    ) -> Result<(), SerializationError>;
+}
+
+impl<T> ErasedSerializeRow for T
+where
+    T: SerializeRow,
+{
+    fn serialize<'buf>(
+        &self,
+        ctx: &RowSerializationContext<'_>,
+        writer: &mut RowWriter<'buf, dyn CqlBuffer>,
+    ) -> Result<(), SerializationError> {
+        <Self as SerializeRow>::preliminary_type_check(ctx)?;
+        <Self as SerializeRow>::serialize(&self, ctx, writer)
+    }
+}
+
+impl<'erased> SerializeRow for dyn ErasedSerializeRow + 'erased {
+    #[inline]
+    fn preliminary_type_check(ctx: &RowSerializationContext<'_>) -> Result<(), SerializationError>
+    where
+        Self: Sized,
+    {
+        // Type check is postponed to `serialize`
+        Ok(())
+    }
+
+    fn serialize<'buf, B: CqlBuffer + ?Sized>(
+        &self,
+        ctx: &RowSerializationContext<'_>,
+        writer: &mut RowWriter<'buf, B>,
+    ) -> Result<(), SerializationError> {
+        <Self as ErasedSerializeRow>::serialize(self, ctx, writer.into_dyn())
+    }
+}
+
+macro_rules! impl_serialize_row_from_erased {
+    ($typ:ty) => {};
+}
+
+impl_serialize_row_from_erased!(dyn SerializeCql);
+
+// impl<T: ErasedSerializeRow + ?Sized> SerializeRow for T {
+//     #[inline]
+//     fn preliminary_type_check(ctx: &RowSerializationContext<'_>) -> Result<(), SerializationError>
+//     where
+//         Self: Sized,
+//     {
+//         // Type check is postponed to `serialize`
+//         Ok(())
+//     }
+
+//     fn serialize<'buf, B: CqlBuffer>(
+//         &self,
+//         ctx: &RowSerializationContext<'_>,
+//         writer: &mut RowWriter<'buf, B>,
+//     ) -> Result<(), SerializationError> {
+//         <Self as ErasedSerializeRow>::serialize(self, ctx, writer)
+//     }
+// }
+
 macro_rules! fallback_impl_contents {
     () => {
         fn preliminary_type_check(
