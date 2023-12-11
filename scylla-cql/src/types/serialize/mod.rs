@@ -8,7 +8,7 @@ pub mod writers;
 
 pub use writers::{CellValueBuilder, CellWriter, RowWriter};
 #[derive(Debug, Clone, Error)]
-pub struct SerializationError(Arc<dyn Error + Send + Sync>);
+pub struct SerializationError(pub Arc<dyn Error + Send + Sync>);
 
 impl SerializationError {
     /// Constructs a new `SerializationError`.
