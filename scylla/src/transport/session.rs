@@ -2043,7 +2043,6 @@ impl RequestSpan {
             .record("replicas", tracing::field::display(&ReplicaIps(replicas)));
     }
 
-    #[allow(dead_code)]
     pub(crate) fn record_request_size(&self, size: usize) {
         self.span.record("request_size", size);
     }
