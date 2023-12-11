@@ -1,3 +1,5 @@
+//! Contains the [`SerializeRow`] trait and its implementations.
+
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Display;
@@ -32,14 +34,30 @@ impl<'a> RowSerializationContext<'a> {
     }
 }
 
+/// Represents a set of values that can be sent along a CQL statement.
+///
+/// This is a low-level trait that is exposed to the specifics to the CQL
+/// protocol and usually does not have to be implemented directly. See the
+/// chapter on "Query Values" in the driver docs for information about how
+/// this trait is supposed to be used.
 pub trait SerializeRow {
     /// Serializes the row according to the information in the given context.
+    ///
+    /// It's the trait's responsibility to produce values in the order as
+    /// specified in given serialization context.
     fn serialize(
         &self,
         ctx: &RowSerializationContext<'_>,
         writer: &mut RowWriter,
     ) -> Result<(), SerializationError>;
 
+    /// Returns whether this row contains any values or not.
+    ///
+    /// This method is used before executing a simple statement in order to check
+    /// whether there are any values provided to it. If there are some, then
+    /// the query will be prepared first in order to obtain information about
+    /// the bind marker types and names so that the values can be properly
+    /// type checked and serialized.
     fn is_empty(&self) -> bool;
 }
 
@@ -411,7 +429,8 @@ pub fn serialize_legacy_row<T: ValueList>(
             RawValue::Null => cell_writer.set_null(),
             RawValue::Unset => cell_writer.set_unset(),
             // The unwrap below will succeed because the value was successfully
-            // deserialized from the CQL format, so it must have
+            // deserialized from the CQL format, so it must have had correct
+            // size.
             RawValue::Value(v) => cell_writer.set_value(v).unwrap(),
         };
     };
@@ -514,19 +533,35 @@ fn mk_ser_err_named(
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum BuiltinTypeCheckErrorKind {
-    /// The Rust type expects `asked_for` column, but the query requires `actual`.
-    WrongColumnCount { actual: usize, asked_for: usize },
+    /// The Rust type expects `actual` column, but the query statements `asked_for`.
+    WrongColumnCount {
+        /// The number of values that the Rust type provides.
+        actual: usize,
+
+        /// The number of columns that the statement requires.
+        asked_for: usize,
+    },
 
     /// The Rust type provides a value for some column, but that column is not
     /// present in the statement.
-    MissingValueForColumn { name: String },
+    MissingValueForColumn {
+        /// Name of the column that is missing in the statement.
+        name: String,
+    },
 
     /// A value required by the statement is not provided by the Rust type.
-    ColumnMissingForValue { name: String },
+    ColumnMissingForValue {
+        /// Name of the column for which the Rust type doesn't
+        /// provide a value.
+        name: String,
+    },
 
     /// A different column name was expected at given position.
     ColumnNameMismatch {
+        /// Name of the column, as expected by the Rust type.
         rust_column_name: String,
+
+        /// Name of the column for which the DB requested a value.
         db_column_name: String,
     },
 }
@@ -563,7 +598,10 @@ impl Display for BuiltinTypeCheckErrorKind {
 pub enum BuiltinSerializationErrorKind {
     /// One of the columns failed to serialize.
     ColumnSerializationFailed {
+        /// Name of the column that failed to serialize.
         name: String,
+
+        /// The error that caused the column serialization to fail.
         err: SerializationError,
     },
 }
