@@ -172,33 +172,24 @@ impl<'a, T: TypecheckedBatchValues + ?Sized> TypecheckedBatchValues for &'a T {
 
 // Converting BatchValues to TypecheckedBatchValues
 
-pub struct TypecheckedBatchValuesIteratorFromBatchValuesIterator<
-    'a,
-    BVI: BatchValuesIterator<'a>,
-    CTX: Iterator<Item = &'a RowSerializationContext<'a>>,
-> {
+pub struct TypecheckedBatchValuesIteratorFromBatchValuesIterator<BVI, CTX> {
     bvi: BVI,
     ctx: CTX,
-    _spooky: std::marker::PhantomData<&'a ()>,
 }
 
-impl<'a, BVI: BatchValuesIterator<'a>, CTX: Iterator<Item = &'a RowSerializationContext<'a>>>
-    TypecheckedBatchValuesIteratorFromBatchValuesIterator<'a, BVI, CTX>
-{
+impl<BVI, CTX> TypecheckedBatchValuesIteratorFromBatchValuesIterator<BVI, CTX> {
     pub fn new(bvi: BVI, ctx: CTX) -> Self {
-        Self {
-            bvi,
-            ctx,
-            _spooky: std::marker::PhantomData,
-        }
+        Self { bvi, ctx }
     }
 }
 
-impl<'a, BVI: BatchValuesIterator<'a>, CTX: Iterator<Item = &'a RowSerializationContext<'a>>>
-    TypecheckedBatchValuesIterator<'a>
-    for TypecheckedBatchValuesIteratorFromBatchValuesIterator<'a, BVI, CTX>
+impl<'bvi, 'ctx, BVI, CTX> TypecheckedBatchValuesIterator<'bvi>
+    for TypecheckedBatchValuesIteratorFromBatchValuesIterator<BVI, CTX>
+where
+    BVI: BatchValuesIterator<'bvi>,
+    CTX: Iterator<Item = &'ctx RowSerializationContext<'ctx>>,
 {
-    fn next_serialized(&mut self) -> Option<SerializedResult<'a>> {
+    fn next_serialized(&mut self) -> Option<SerializedResult<'bvi>> {
         if let Some(ctx) = self.ctx.next() {
             let mut data = Vec::new();
             let element_count = {
@@ -248,22 +239,17 @@ impl<'a, BVI: BatchValuesIterator<'a>, CTX: Iterator<Item = &'a RowSerialization
     }
 }
 
-pub struct TypecheckedBatchValuesFromBatchValues<
-    'a,
-    BV: BatchValues,
-    CTX: Iterator<Item = &'a RowSerializationContext<'a>>,
-> {
+pub struct TypecheckedBatchValuesFromBatchValues<BV, CTX> {
     bv: BV,
     ctx: CTX,
-    _spooky: std::marker::PhantomData<&'a ()>,
 }
 
-impl<'a, BV, CTX> TypecheckedBatchValues for TypecheckedBatchValuesFromBatchValues<'a, BV, CTX>
+impl<'a, BV, CTX> TypecheckedBatchValues for TypecheckedBatchValuesFromBatchValues<BV, CTX>
 where
     BV: BatchValues,
     CTX: Iterator<Item = &'a RowSerializationContext<'a>> + Clone,
 {
-    type TypecheckedBatchValuesIter<'r> = TypecheckedBatchValuesIteratorFromBatchValuesIterator<'a, BV::BatchValuesIter<'a>, CTX>
+    type TypecheckedBatchValuesIter<'r> = TypecheckedBatchValuesIteratorFromBatchValuesIterator<BV::BatchValuesIter<'r>, CTX>
     where
         Self: 'r;
 
