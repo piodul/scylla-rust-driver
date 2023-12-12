@@ -4,7 +4,10 @@ use scylla_cql::errors::TranslationError;
 use scylla_cql::frame::request::options::Options;
 use scylla_cql::frame::response::Error;
 use scylla_cql::frame::types::SerialConsistency;
-use scylla_cql::types::serialize::row::SerializedValues;
+use scylla_cql::types::serialize::row::{RowSerializationContext, SerializedValues};
+use scylla_cql::types::serialize::typechecked_batch::{
+    TypecheckedBatchValues, TypecheckedBatchValuesIterator,
+};
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{split, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpSocket, TcpStream};
@@ -784,6 +787,12 @@ impl Connection {
         serial_consistency: Option<SerialConsistency>,
     ) -> Result<QueryResult, QueryError> {
         let batch = self.prepare_batch(init_batch, &values).await?;
+        let ctx_iter = batch.statements.iter().map(|st| match st {
+            BatchStatement::Query(_) => panic!("Query in prepared batch"),
+            BatchStatement::PreparedStatement(ps) => {
+                RowSerializationContext::from_prepared(ps.get_prepared_metadata())
+            }
+        });
 
         let batch_frame = batch::Batch {
             statements: Cow::Borrowed(&batch.statements),

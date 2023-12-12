@@ -1,11 +1,16 @@
 use bytes::{Buf, BufMut};
 use std::{borrow::Cow, convert::TryInto};
 
-use crate::frame::{
-    frame_errors::ParseError,
-    request::{RequestOpcode, SerializableRequest},
-    types::{self, SerialConsistency},
-    value::{BatchValues, BatchValuesIterator, LegacySerializedValues},
+use crate::{
+    frame::{
+        frame_errors::ParseError,
+        request::{RequestOpcode, SerializableRequest},
+        types::{self, SerialConsistency},
+    },
+    types::serialize::{
+        row::SerializedValues,
+        typechecked_batch::{TypecheckedBatchValues, TypecheckedBatchValuesIterator},
+    },
 };
 
 use super::DeserializableRequest;
@@ -20,7 +25,7 @@ pub struct Batch<'b, Statement, Values>
 where
     BatchStatement<'b>: From<&'b Statement>,
     Statement: Clone,
-    Values: BatchValues,
+    Values: TypecheckedBatchValues,
 {
     pub statements: Cow<'b, [Statement]>,
     pub batch_type: BatchType,
@@ -72,7 +77,7 @@ impl<Statement, Values> SerializableRequest for Batch<'_, Statement, Values>
 where
     for<'s> BatchStatement<'s>: From<&'s Statement>,
     Statement: Clone,
-    Values: BatchValues,
+    Values: TypecheckedBatchValues,
 {
     const OPCODE: RequestOpcode = RequestOpcode::Batch;
 
@@ -186,7 +191,7 @@ impl<'s, 'b> From<&'s BatchStatement<'b>> for BatchStatement<'s> {
     }
 }
 
-impl<'b> DeserializableRequest for Batch<'b, BatchStatement<'b>, Vec<LegacySerializedValues>> {
+impl<'b> DeserializableRequest for Batch<'b, BatchStatement<'b>, Vec<SerializedValues>> {
     fn deserialize(buf: &mut &[u8]) -> Result<Self, ParseError> {
         let batch_type = buf.get_u8().try_into()?;
 
@@ -195,8 +200,7 @@ impl<'b> DeserializableRequest for Batch<'b, BatchStatement<'b>, Vec<LegacySeria
             .map(|_| {
                 let batch_statement = BatchStatement::deserialize(buf)?;
 
-                // As stated in CQL protocol v4 specification, values names in Batch are broken and should be never used.
-                let values = LegacySerializedValues::new_from_frame(buf, false)?;
+                let values = SerializedValues::new_from_frame(buf)?;
 
                 Ok((batch_statement, values))
             })
@@ -233,7 +237,7 @@ impl<'b> DeserializableRequest for Batch<'b, BatchStatement<'b>, Vec<LegacySeria
             .then(|| types::read_long(buf))
             .transpose()?;
 
-        let (statements, values): (Vec<BatchStatement>, Vec<LegacySerializedValues>) =
+        let (statements, values): (Vec<BatchStatement>, Vec<SerializedValues>) =
             statements_with_values.into_iter().unzip();
 
         Ok(Self {

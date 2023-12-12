@@ -587,8 +587,8 @@ pub enum ValueListToSerializeRowAdapterError {
 /// Allows adding new values to the buffer and iterating over the content.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SerializedValues {
-    serialized_values: Vec<u8>,
-    element_count: u16,
+    pub(crate) serialized_values: Vec<u8>,
+    pub(crate) element_count: u16,
 }
 
 impl SerializedValues {
