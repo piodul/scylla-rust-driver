@@ -1,6 +1,7 @@
 use crate::frame::types::RawValue;
 
-use super::row::SerializedValues;
+use super::batch::{BatchValues, BatchValuesIterator};
+use super::row::{RowSerializationContext, SerializeRow, SerializedValues};
 use super::{RowWriter, SerializationError};
 
 /// A version of `scylla`'s `BatchValues` which knows how to serialize itself
@@ -97,5 +98,86 @@ impl<'r> RawSerializeRow for &'r SerializedValues {
             };
         }
         Ok(())
+    }
+}
+
+/// Takes `BatchValues` and an iterator over contexts, and turns them into a `RawBatchValues`.
+pub struct RawBatchValuesAdapter<BV, CTX> {
+    batch_values: BV,
+    contexts: CTX,
+}
+
+impl<BV, CTX> RawBatchValuesAdapter<BV, CTX> {
+    #[inline]
+    pub fn new(batch_values: BV, contexts: CTX) -> Self {
+        Self {
+            batch_values,
+            contexts,
+        }
+    }
+}
+
+impl<'ctx, BV, CTX> RawBatchValues for RawBatchValuesAdapter<BV, CTX>
+where
+    BV: BatchValues,
+    CTX: Iterator<Item = RowSerializationContext<'ctx>> + Clone,
+{
+    type RawBatchValuesIter<'r> = RawBatchValuesIteratorAdapter<BV::BatchValuesIter<'r>, CTX>
+    where
+        Self: 'r;
+
+    #[inline]
+    fn batch_values_iter(&self) -> Self::RawBatchValuesIter<'_> {
+        RawBatchValuesIteratorAdapter {
+            batch_values_iterator: self.batch_values.batch_values_iter(),
+            contexts: self.contexts.clone(),
+        }
+    }
+}
+
+pub struct RawBatchValuesIteratorAdapter<BVI, CTX> {
+    batch_values_iterator: BVI,
+    contexts: CTX,
+}
+
+impl<'bvi, 'ctx, BVI, CTX> RawBatchValuesIterator<'bvi> for RawBatchValuesIteratorAdapter<BVI, CTX>
+where
+    BVI: BatchValuesIterator<'bvi>,
+    CTX: Iterator<Item = RowSerializationContext<'ctx>>,
+{
+    type Row<'r> = RawSerializeRowAdapter<'ctx, BVI::Row<'r>>
+    where
+        Self: 'r;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Row<'_>> {
+        let row = self.batch_values_iterator.next()?;
+        let context = self.contexts.next()?;
+        Some(RawSerializeRowAdapter {
+            serialized_values: row,
+            context,
+        })
+    }
+
+    #[inline]
+    fn skip_next(&mut self) -> Option<()> {
+        self.batch_values_iterator.skip_next()?;
+        self.contexts.next()?;
+        Some(())
+    }
+}
+
+pub struct RawSerializeRowAdapter<'ctx, SV> {
+    serialized_values: SV,
+    context: RowSerializationContext<'ctx>,
+}
+
+impl<'sv, 'ctx, SV> RawSerializeRow for RawSerializeRowAdapter<'ctx, SV>
+where
+    SV: SerializeRow + 'sv,
+{
+    #[inline]
+    fn serialize(&self, writer: &mut RowWriter<'_>) -> Result<(), SerializationError> {
+        self.serialized_values.serialize(&self.context, writer)
     }
 }
