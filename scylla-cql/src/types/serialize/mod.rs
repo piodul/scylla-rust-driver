@@ -2,7 +2,9 @@ use std::{error::Error, fmt::Display, sync::Arc};
 
 use thiserror::Error;
 
+pub mod batch;
 pub mod row;
+pub mod raw_batch;
 pub mod value;
 pub mod writers;
 
