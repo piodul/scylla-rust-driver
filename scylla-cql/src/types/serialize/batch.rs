@@ -271,3 +271,129 @@ impl<'a, T: BatchValues + ?Sized> BatchValues for &'a T {
         <T as BatchValues>::batch_values_iter(*self)
     }
 }
+
+// The "first serialized" optimization
+
+pub mod first_serialized {
+    // TODO: Should this module be in `scylla` and be hidden?
+    use crate::_macro_internal::{RowWriter, SerializationError, SerializeRow};
+    use crate::frame::types::RawValue;
+    use crate::types::serialize::row::SerializedValues;
+
+    use super::{BatchValues, BatchValuesIterator};
+
+    pub struct BatchValuesFirstSerialized<'f, BV> {
+        // Contains the first value of BV in a serialized form.
+        // The first value in the iterator returned from `rest` should be skipped!
+        first: Option<&'f SerializedValues>,
+        rest: BV,
+    }
+
+    impl<'f, BV> BatchValuesFirstSerialized<'f, BV> {
+        #[inline]
+        pub fn new(rest: BV, first: Option<&'f SerializedValues>) -> Self {
+            Self { first, rest }
+        }
+    }
+
+    impl<'f, BV> BatchValues for BatchValuesFirstSerialized<'f, BV>
+    where
+        BV: BatchValues,
+    {
+        type BatchValuesIter<'r> = BatchValuesFirstSerializedIterator<'r, BV::BatchValuesIter<'r>>
+    where
+        Self: 'r;
+
+        fn batch_values_iter(&self) -> Self::BatchValuesIter<'_> {
+            BatchValuesFirstSerializedIterator {
+                first: self.first.clone(),
+                rest: self.rest.batch_values_iter(),
+            }
+        }
+    }
+
+    pub struct BatchValuesFirstSerializedIterator<'f, BVI> {
+        first: Option<&'f SerializedValues>,
+        rest: BVI,
+    }
+
+    impl<'f, BVI> BatchValuesIterator<'f> for BatchValuesFirstSerializedIterator<'f, BVI>
+    where
+        BVI: BatchValuesIterator<'f>,
+    {
+        type Row<'r> = BatchValuesFirstSerializedRow<'r, BVI::Row<'r>>
+    where
+        Self: 'r;
+
+        #[inline]
+        fn next(&mut self) -> Option<Self::Row<'_>> {
+            match self.first.take() {
+                Some(s) => {
+                    self.rest.skip_next();
+                    Some(BatchValuesFirstSerializedRow::Serialized(s))
+                }
+                None => self
+                    .rest
+                    .next()
+                    .map(BatchValuesFirstSerializedRow::Unserialized),
+            }
+        }
+
+        #[inline]
+        fn skip_next(&mut self) -> Option<()> {
+            self.first = None;
+            self.rest.skip_next()
+        }
+
+        #[inline]
+        fn count(self) -> usize
+        where
+            Self: Sized,
+        {
+            self.rest.count()
+        }
+    }
+
+    pub enum BatchValuesFirstSerializedRow<'f, R> {
+        Serialized(&'f SerializedValues),
+        Unserialized(R),
+    }
+
+    impl<'f, R> SerializeRow for BatchValuesFirstSerializedRow<'f, R>
+    where
+        R: SerializeRow,
+    {
+        #[inline]
+        fn serialize(
+            &self,
+            ctx: &crate::_macro_internal::RowSerializationContext<'_>,
+            writer: &mut RowWriter,
+        ) -> Result<(), SerializationError> {
+            match self {
+                BatchValuesFirstSerializedRow::Serialized(s) => {
+                    // TODO: We should just be able to copy the bytes
+                    for v in s.iter() {
+                        let writer = writer.make_cell_writer();
+                        match v {
+                            RawValue::Null => writer.set_null(),
+                            RawValue::Unset => writer.set_unset(),
+                            RawValue::Value(v) => {
+                                writer.set_value(v).map_err(SerializationError::new)?
+                            }
+                        };
+                    }
+                    Ok(())
+                }
+                BatchValuesFirstSerializedRow::Unserialized(u) => u.serialize(ctx, writer),
+            }
+        }
+
+        #[inline]
+        fn is_empty(&self) -> bool {
+            match self {
+                BatchValuesFirstSerializedRow::Serialized(s) => s.is_empty(),
+                BatchValuesFirstSerializedRow::Unserialized(u) => u.is_empty(),
+            }
+        }
+    }
+}
