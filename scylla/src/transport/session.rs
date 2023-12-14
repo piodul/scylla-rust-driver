@@ -13,10 +13,13 @@ use bytes::Bytes;
 use futures::future::join_all;
 use futures::future::try_join_all;
 use itertools::{Either, Itertools};
+use scylla_cql::_macro_internal::RowSerializationContext;
 pub use scylla_cql::errors::TranslationError;
 use scylla_cql::frame::response::result::{deser_cql_value, ColumnSpec, Rows};
 use scylla_cql::frame::response::NonErrorResponse;
-use scylla_cql::types::serialize::row::SerializeRow;
+use scylla_cql::types::serialize::batch::first_serialized::BatchValuesFirstSerialized;
+use scylla_cql::types::serialize::batch::{BatchValues, BatchValuesIterator};
+use scylla_cql::types::serialize::row::{SerializeRow, SerializedValues};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -47,9 +50,6 @@ use super::NodeRef;
 use crate::cql_to_rust::FromRow;
 use crate::frame::response::cql_to_rust::FromRowError;
 use crate::frame::response::result;
-use crate::frame::value::{
-    LegacyBatchValues, LegacyBatchValuesFirstSerialized, LegacyBatchValuesIterator,
-};
 use crate::prepared_statement::PreparedStatement;
 use crate::query::Query;
 use crate::routing::Token;
@@ -1167,7 +1167,7 @@ impl Session {
     pub async fn batch(
         &self,
         batch: &Batch,
-        values: impl LegacyBatchValues,
+        values: impl BatchValues,
     ) -> Result<QueryResult, QueryError> {
         // Shard-awareness behavior for batch will be to pick shard based on first batch statement's shard
         // If users batch statements by shard, they will be rewarded with full shard awareness
@@ -1179,9 +1179,6 @@ impl Session {
                 BadQuery::TooManyQueriesInBatchStatement(batch_statements_length),
             ));
         }
-        // Extract first serialized_value
-        let first_serialized_value = values.batch_values_iter().next_serialized().transpose()?;
-        let first_serialized_value = first_serialized_value.as_deref();
 
         let execution_profile = batch
             .get_execution_profile_handle()
@@ -1198,27 +1195,42 @@ impl Session {
             .serial_consistency
             .unwrap_or(execution_profile.serial_consistency);
 
-        let statement_info = match (first_serialized_value, batch.statements.first()) {
-            (Some(first_serialized_value), Some(BatchStatement::PreparedStatement(ps))) => {
-                RoutingInfo {
-                    consistency,
-                    serial_consistency,
-                    token: ps.calculate_token(first_serialized_value)?,
-                    keyspace: ps.get_keyspace_name(),
-                    is_confirmed_lwt: false,
+        let (first_serialized_value, statement_info) = {
+            let mut values_iter = values.batch_values_iter();
+            let first_values = values_iter.next();
+
+            // The temporary "p" is necessary because lifetimes
+            let p = match (first_values, batch.statements.first()) {
+                (Some(first_values), Some(BatchStatement::PreparedStatement(ps))) => {
+                    let ctx = RowSerializationContext::from_prepared(ps.get_prepared_metadata());
+                    let first_serialized_value =
+                        SerializedValues::from_serializable(&ctx, &first_values)?;
+
+                    let ri = RoutingInfo {
+                        consistency,
+                        serial_consistency,
+                        token: ps.calculate_token_untyped(&first_serialized_value)?,
+                        keyspace: ps.get_keyspace_name(),
+                        is_confirmed_lwt: false,
+                    };
+                    (Some(first_serialized_value), ri)
                 }
-            }
-            _ => RoutingInfo {
-                consistency,
-                serial_consistency,
-                ..Default::default()
-            },
+                _ => (
+                    None,
+                    RoutingInfo {
+                        consistency,
+                        serial_consistency,
+                        ..Default::default()
+                    },
+                ),
+            };
+            p
         };
         let first_value_token = statement_info.token;
 
         // Reuse first serialized value when serializing query, and delegate to `BatchValues::write_next_to_request`
         // directly for others (if they weren't already serialized, possibly don't even allocate the `LegacySerializedValues`)
-        let values = LegacyBatchValuesFirstSerialized::new(&values, first_serialized_value);
+        let values = BatchValuesFirstSerialized::new(&values, first_serialized_value.as_ref());
         let values_ref = &values;
 
         let span = RequestSpan::new_batch();
