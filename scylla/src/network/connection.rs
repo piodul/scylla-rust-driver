@@ -28,6 +28,7 @@ use crate::statement::batch::{Batch, BatchStatement};
 use crate::statement::prepared::{PreparedStatement, RawPreparedStatement};
 use crate::statement::unprepared::Statement;
 use crate::statement::{Consistency, PageSize};
+use crate::utils::maybe_infinite_sleep::MaybeInfiniteSleep;
 use bytes::Bytes;
 use futures::{FutureExt, future::RemoteHandle};
 use scylla_cql::frame::frame_errors::CqlResponseParseError;
@@ -49,9 +50,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicU64;
+use std::task::Context;
+use std::task::Poll;
 use std::time::Duration;
 use std::{
     cmp::Ordering,
@@ -1726,6 +1730,24 @@ impl Connection {
         Ok(())
     }
 
+    async fn deadliner(handler_map: &StdMutex<ResponseHandlerMap>) {
+        std::future::poll_fn(move |cx| {
+            let mut handler_map = handler_map.try_lock().unwrap();
+            let requests_to_orphan = handler_map.poll_extract_timed_out_requests(cx);
+
+            for request_id in requests_to_orphan {
+                let maybe_handler = handler_map.orphan(request_id);
+                if let Some(handler) = maybe_handler {
+                    let _ = handler.response_sender.send(todo!());
+                }
+            }
+
+            // This future never resolves
+            Poll::Pending
+        })
+        .await
+    }
+
     async fn keepaliver(
         router_handle: Arc<RouterHandle>,
         keepalive_interval: Option<Duration>,
@@ -2136,6 +2158,7 @@ struct ResponseHandlerMap {
     handlers: HashMap<i16, ResponseHandler>,
 
     request_to_stream: HashMap<RequestId, i16>,
+    deadline_tracker: DeadlineTracker,
     orphanage_tracker: OrphanageTracker,
 }
 
@@ -2151,6 +2174,7 @@ impl ResponseHandlerMap {
             stream_set: StreamIdSet::new(),
             handlers: HashMap::new(),
             request_to_stream: HashMap::new(),
+            deadline_tracker: DeadlineTracker::new(),
             orphanage_tracker: OrphanageTracker::new(),
         }
     }
@@ -2170,15 +2194,18 @@ impl ResponseHandlerMap {
 
     // Orphan stream_id (associated with this request_id) by moving it to
     // `orphanage_tracker`, and freeing its handler
-    fn orphan(&mut self, request_id: RequestId) {
+    fn orphan(&mut self, request_id: RequestId) -> Option<ResponseHandler> {
         if let Some(stream_id) = self.request_to_stream.get(&request_id) {
             debug!(
                 "Orphaning stream_id = {} associated with request_id = {}",
                 stream_id, request_id
             );
             self.orphanage_tracker.insert(*stream_id);
-            self.handlers.remove(stream_id);
+            let maybe_handler = self.handlers.remove(stream_id);
             self.request_to_stream.remove(&request_id);
+            maybe_handler
+        } else {
+            None
         }
     }
 
@@ -2207,6 +2234,10 @@ impl ResponseHandlerMap {
         } else {
             HandlerLookupResult::Missing
         }
+    }
+
+    fn poll_extract_timed_out_requests(&mut self, cx: &mut Context<'_>) -> Vec<RequestId> {
+        self.deadline_tracker.poll_extract_timed_out_requests(cx)
     }
 
     // Retrieves the map of handlers, used after connection breaks
@@ -2244,6 +2275,58 @@ impl StreamIdSet {
         let block_id = stream_id as usize / 64;
         let off = stream_id as usize % 64;
         self.used_bitmap[block_id] &= !(1 << off);
+    }
+}
+
+struct DeadlineTracker {
+    deadlines: BTreeSet<(Instant, RequestId)>,
+    next_deadline_check_timer: MaybeInfiniteSleep,
+}
+
+impl DeadlineTracker {
+    fn new() -> Self {
+        Self {
+            deadlines: BTreeSet::new(),
+            next_deadline_check_timer: MaybeInfiniteSleep::new_infinite(),
+        }
+    }
+
+    fn register_request(&mut self, request_id: RequestId, deadline: Instant) {
+        self.deadlines.insert((deadline, request_id));
+        if self
+            .next_deadline_check_timer
+            .deadline()
+            .map_or(true, |d| d > deadline)
+        {
+            self.next_deadline_check_timer.reset(Some(deadline));
+        }
+    }
+
+    fn unregister_request(&mut self, request_id: RequestId, deadline: Instant) {
+        self.deadlines.remove(&(deadline, request_id));
+    }
+
+    fn poll_extract_timed_out_requests(&mut self, cx: &mut Context<'_>) -> Vec<RequestId> {
+        let mut ret = Vec::new();
+
+        while Pin::new(&mut self.next_deadline_check_timer)
+            .poll(cx)
+            .is_ready()
+        {
+            let clear_time = Instant::now();
+
+            while let Some((deadline, request_id)) = self.deadlines.first()
+                && clear_time >= *deadline
+            {
+                ret.push(*request_id);
+                self.deadlines.pop_first();
+            }
+
+            let next_check_time = self.deadlines.first().map(|(d, _)| *d);
+            self.next_deadline_check_timer.reset(next_check_time);
+        }
+
+        ret
     }
 }
 
