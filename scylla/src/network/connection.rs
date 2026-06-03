@@ -49,7 +49,7 @@ use scylla_cql::serialize::raw_batch::RawBatchValuesAdapter;
 use scylla_cql::serialize::row::{RowSerializationContext, SerializedValues};
 use socket2::{SockRef, TcpKeepalive};
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
@@ -1585,10 +1585,9 @@ impl Connection {
         };
 
         // Respond to all pending requests with the error
-        let response_handlers: HashMap<i16, ResponseHandler> =
-            handler_map.into_inner().unwrap().into_handlers();
+        let response_handlers = handler_map.into_inner().unwrap().into_handlers();
 
-        for (_, handler) in response_handlers {
+        for handler in response_handlers {
             // Ignore sending error, request was dropped
             let _ = handler.response_sender.send(Err(error.clone().into()));
         }
@@ -1747,13 +1746,28 @@ impl Connection {
         mut orphan_receiver: mpsc::UnboundedReceiver<RequestId>,
     ) -> Result<(), BrokenConnectionError> {
         let mut interval = tokio::time::interval(OLD_AGE_ORPHAN_THRESHOLD);
+        let mut current_orphans: HashMap<i16, Instant> = HashMap::new();
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     // We are guaranteed here that handler_map will not be locked
                     // by anybody else, so we can do try_lock().unwrap()
                     let handler_map_guard = handler_map.try_lock().unwrap();
-                    let old_orphan_count = handler_map_guard.old_orphans_count();
+                    // Remove invalid orphans and count the old ones
+                    let mut old_orphan_count = 0;
+                    let now = Instant::now();
+                    current_orphans.retain(|stream_id, orphaned_at| {
+                        let Some(handler) = handler_map_guard.handlers.get(stream_id) else {
+                            return false;
+                        };
+                        if handler.is_valid() {
+                            return false;
+                        }
+                        if now - *orphaned_at >= OLD_AGE_ORPHAN_THRESHOLD {
+                            old_orphan_count += 1;
+                        }
+                        true
+                    });
                     if old_orphan_count > OLD_ORPHAN_COUNT_THRESHOLD {
                         warn!(
                             "Too many old orphaned stream ids: {}",
@@ -1768,7 +1782,9 @@ impl Connection {
                         request_id,
                     );
                     let mut handler_map_guard = handler_map.try_lock().unwrap(); // Same as above
-                    handler_map_guard.orphan(request_id);
+                    if let Some(stream_id) = handler_map_guard.orphan(request_id) {
+                        current_orphans.insert(stream_id, Instant::now());
+                    }
                 }
                 else => { break }
             }
@@ -2240,52 +2256,29 @@ fn setup_tcp_keepalive(sf: &SockRef<'_>, tcp_keepalive_interval: Duration) -> st
     sf.set_tcp_keepalive(&tcp_keepalive)
 }
 
-struct OrphanageTracker {
-    orphans: HashMap<i16, Instant>,
-    by_orphaning_times: BTreeSet<(Instant, i16)>,
-}
-
-impl OrphanageTracker {
-    fn new() -> Self {
-        Self {
-            orphans: HashMap::new(),
-            by_orphaning_times: BTreeSet::new(),
-        }
-    }
-
-    fn insert(&mut self, stream_id: i16) {
-        let now = Instant::now();
-        self.orphans.insert(stream_id, now);
-        self.by_orphaning_times.insert((now, stream_id));
-    }
-
-    fn remove(&mut self, stream_id: i16) {
-        if let Some(time) = self.orphans.remove(&stream_id) {
-            self.by_orphaning_times.remove(&(time, stream_id));
-        }
-    }
-
-    fn contains(&self, stream_id: i16) -> bool {
-        self.orphans.contains_key(&stream_id)
-    }
-
-    fn orphans_older_than(&self, age: std::time::Duration) -> usize {
-        let minimal_age = Instant::now() - age;
-        self.by_orphaning_times
-            .range(..(minimal_age, i16::MAX))
-            .count() // This has linear time complexity, but in terms of
-        // the number of old orphans. Healthy connection - one
-        // that does not have old orphaned stream ids, will
-        // calculate this function quickly.
-    }
-}
-
 struct ResponseHandlerMap {
     stream_set: StreamIdSet,
-    handlers: HashMap<i16, ResponseHandler>,
+    handlers: HashMap<i16, ResponseHandlerMapEntry>,
 
     request_to_stream: HashMap<RequestId, i16>,
-    orphanage_tracker: OrphanageTracker,
+}
+
+enum ResponseHandlerMapEntry {
+    Orphaned,
+    Valid(ResponseHandler),
+}
+
+impl ResponseHandlerMapEntry {
+    fn into_valid(self) -> Option<ResponseHandler> {
+        match self {
+            Self::Orphaned => None,
+            Self::Valid(response_handler) => Some(response_handler),
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        matches!(self, &Self::Valid(_))
+    }
 }
 
 enum HandlerLookupResult {
@@ -2300,7 +2293,6 @@ impl ResponseHandlerMap {
             stream_set: StreamIdSet::new(),
             handlers: HashMap::new(),
             request_to_stream: HashMap::new(),
-            orphanage_tracker: OrphanageTracker::new(),
         }
     }
 
@@ -2308,7 +2300,9 @@ impl ResponseHandlerMap {
         if let Some(stream_id) = self.stream_set.allocate() {
             self.request_to_stream
                 .insert(response_handler.request_id, stream_id);
-            let prev_handler = self.handlers.insert(stream_id, response_handler);
+            let prev_handler = self
+                .handlers
+                .insert(stream_id, ResponseHandlerMapEntry::Valid(response_handler));
             assert!(prev_handler.is_none());
 
             Ok(stream_id)
@@ -2317,42 +2311,41 @@ impl ResponseHandlerMap {
         }
     }
 
-    // Orphan stream_id (associated with this request_id) by moving it to
-    // `orphanage_tracker`, and freeing its handler
-    fn orphan(&mut self, request_id: RequestId) {
+    // Orphan stream_id (associated with this request_id) by setting its
+    // response handler map entry to `Orphaned`
+    fn orphan(&mut self, request_id: RequestId) -> Option<i16> {
         if let Some(stream_id) = self.request_to_stream.get(&request_id) {
             debug!(
                 "Orphaning stream_id = {} associated with request_id = {}",
                 stream_id, request_id
             );
-            self.orphanage_tracker.insert(*stream_id);
-            self.handlers.remove(stream_id);
+            *self.handlers.get_mut(stream_id).unwrap() = ResponseHandlerMapEntry::Orphaned;
+            let stream_id = *stream_id;
             self.request_to_stream.remove(&request_id);
+            Some(stream_id)
+        } else {
+            None
         }
-    }
-
-    fn old_orphans_count(&self) -> usize {
-        self.orphanage_tracker
-            .orphans_older_than(OLD_AGE_ORPHAN_THRESHOLD)
     }
 
     fn lookup(&mut self, stream_id: i16) -> HandlerLookupResult {
         self.stream_set.free(stream_id);
 
-        if self.orphanage_tracker.contains(stream_id) {
-            self.orphanage_tracker.remove(stream_id);
-            // This `stream_id` had been orphaned, so its handler got removed.
-            // This is a valid state (as opposed to missing handler)
-            return HandlerLookupResult::Orphaned;
-        }
-
         if let Some(handler) = self.handlers.remove(&stream_id) {
-            // A mapping `request_id` -> `stream_id` must be removed, to
-            // prevent marking this `stream_id` as orphaned by some late
-            // orphan notification.
-            self.request_to_stream.remove(&handler.request_id);
-
-            HandlerLookupResult::Handler(handler)
+            match handler {
+                ResponseHandlerMapEntry::Orphaned => {
+                    // This `stream_id` had been orphaned, so its handler got removed.
+                    // This is a valid state (as opposed to missing handler)
+                    HandlerLookupResult::Orphaned
+                }
+                ResponseHandlerMapEntry::Valid(handler) => {
+                    // A mapping `request_id` -> `stream_id` must be removed, to
+                    // prevent marking this `stream_id` as orphaned by some late
+                    // orphan notification.
+                    self.request_to_stream.remove(&handler.request_id);
+                    HandlerLookupResult::Handler(handler)
+                }
+            }
         } else {
             HandlerLookupResult::Missing
         }
@@ -2360,8 +2353,8 @@ impl ResponseHandlerMap {
 
     // Retrieves the map of handlers, used after connection breaks
     // and we have to respond to all of them with an error
-    fn into_handlers(self) -> HashMap<i16, ResponseHandler> {
-        self.handlers
+    fn into_handlers(self) -> impl Iterator<Item = ResponseHandler> {
+        self.handlers.into_values().filter_map(|e| e.into_valid())
     }
 }
 
