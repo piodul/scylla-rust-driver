@@ -55,7 +55,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use std::{
     cmp::Ordering,
@@ -63,8 +63,8 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter, split};
 use tokio::net::{TcpSocket, TcpStream};
+use tokio::sync::Notify;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::Instant;
 use tracing::{debug, error, trace, warn};
 
 // FIXME: Make this constants configurable
@@ -108,43 +108,82 @@ pub(crate) struct Connection {
 
 struct RouterHandle {
     submit_channel: mpsc::Sender<Task>,
+    orphaner_shared_state: OrphanerSharedState,
+}
 
-    // Each request send by `Connection::send_request` needs a unique request id.
-    // This field is a monotonic generator of such ids.
-    request_id_generator: AtomicU64,
-    // If a `Connection::send_request` is cancelled, it sends notification
-    // about orphaning via the sender below.
-    // Also, this sender is unbounded, because only unbounded channels support
-    // pushing values in a synchronous way (without an `.await`), which is
-    // needed for pushing values in `Drop` implementations.
-    orphan_notification_sender: mpsc::UnboundedSender<RequestId>,
+struct OrphanerSharedState {
+    /// An approximation of the number of orphans. It is incremented each time
+    /// a request is orphaned. The orphaner is allowed to decrement it,
+    /// but must not go below the actual number of orphans.
+    /// It is used to decide whether the orphaner should be woken or not
+    /// (the orphaner is woken up if it reaches `OLD_AGE_ORPHAN_THRESHOLD`).
+    orphan_hit_counter: AtomicUsize,
+
+    /// Used to notify the orphaner.
+    notifier: Notify,
+}
+
+impl OrphanerSharedState {
+    fn new() -> Self {
+        Self {
+            orphan_hit_counter: AtomicUsize::new(0),
+            notifier: Notify::new(),
+        }
+    }
+
+    /// Call it when an orphaned request is detected.
+    /// It must be called only after the request's oneshot has been dropped.
+    fn report_orphaned_request(&self) {
+        let last = self
+            .orphan_hit_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+
+        if last + 1 == OLD_ORPHAN_COUNT_THRESHOLD {
+            self.notifier.notify_one();
+        }
+    }
+
+    /// Used by the orphaner to wait until enough orphans have been reported
+    /// so that it should start measuring their age.
+    async fn wait_for_enough_reported_orphans(&self) -> usize {
+        loop {
+            let current_orphans = self
+                .orphan_hit_counter
+                .load(std::sync::atomic::Ordering::Acquire);
+
+            if current_orphans >= OLD_ORPHAN_COUNT_THRESHOLD {
+                return current_orphans;
+            }
+
+            self.notifier.notified().await;
+        }
+    }
+
+    /// Used by the orphaner to adjust the number of orphans before going
+    /// to sleep.
+    fn decrement_orphan_counter(&self, decrement: usize) {
+        self.orphan_hit_counter
+            .fetch_sub(decrement, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl RouterHandle {
-    fn allocate_request_id(&self) -> RequestId {
-        self.request_id_generator
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    }
-
     async fn send_request(
         &self,
         request: &impl SerializableRequest,
         compression: Option<Compression>,
         tracing: bool,
     ) -> Result<TaskResponse, InternalRequestError> {
+        // Dropping `notified` (before calling `notifier.disable()`) increments
+        // the orphaned requests counter and, optionally, requests the orphaner
+        // to wake up and start tracking orphaned requests more closely.
+        // The notifier must be dropped `after` the response receiver is dropped
+        // so that the orphaner observes that the request is orphaned.
+        let notifier = OrphanhoodNotifier::new(&self.orphaner_shared_state);
+
         let serialized_request = SerializedRequest::make(request, compression, tracing)?;
-        let request_id = self.allocate_request_id();
-
         let (response_sender, receiver) = oneshot::channel();
-        let response_handler = ResponseHandler {
-            response_sender,
-            request_id,
-        };
-
-        // Dropping `notifier` (before calling `notifier.disable()`) will send a notification to
-        // `Connection::router`. This notification is then used to mark a `stream_id` associated
-        // with this request as orphaned and free associated resources.
-        let notifier = OrphanhoodNotifier::new(request_id, &self.orphan_notification_sender);
+        let response_handler = ResponseHandler { response_sender };
 
         self.submit_channel
             .send(Task {
@@ -175,30 +214,22 @@ pub(crate) struct ConnectionFeatures {
     protocol_features: ProtocolFeatures,
 }
 
-type RequestId = u64;
-
 struct ResponseHandler {
     response_sender: oneshot::Sender<Result<TaskResponse, InternalRequestError>>,
-    request_id: RequestId,
 }
 
 // Used to notify `Connection::orphaner` about `Connection::send_request`
 // future being dropped before receiving response.
 struct OrphanhoodNotifier<'a> {
     enabled: bool,
-    request_id: RequestId,
-    notification_sender: &'a mpsc::UnboundedSender<RequestId>,
+    orphaner_shared_state: &'a OrphanerSharedState,
 }
 
 impl<'a> OrphanhoodNotifier<'a> {
-    fn new(
-        request_id: RequestId,
-        notification_sender: &'a mpsc::UnboundedSender<RequestId>,
-    ) -> Self {
+    fn new(orphaner_shared_state: &'a OrphanerSharedState) -> Self {
         Self {
             enabled: true,
-            request_id,
-            notification_sender,
+            orphaner_shared_state,
         }
     }
 
@@ -210,7 +241,7 @@ impl<'a> OrphanhoodNotifier<'a> {
 impl Drop for OrphanhoodNotifier<'_> {
     fn drop(&mut self) {
         if self.enabled {
-            let _ = self.notification_sender.send(self.request_id);
+            self.orphaner_shared_state.report_orphaned_request();
         }
     }
 }
@@ -492,13 +523,10 @@ impl Connection {
         // TODO: What should be the size of the channel?
         let (sender, receiver) = mpsc::channel(1024);
         let (error_sender, error_receiver) = tokio::sync::oneshot::channel();
-        // Unbounded because it allows for synchronous pushes
-        let (orphan_notification_sender, orphan_notification_receiver) = mpsc::unbounded_channel();
 
         let router_handle = Arc::new(RouterHandle {
             submit_channel: sender,
-            request_id_generator: AtomicU64::new(0),
-            orphan_notification_sender,
+            orphaner_shared_state: OrphanerSharedState::new(),
         });
 
         #[cfg(test)]
@@ -512,7 +540,6 @@ impl Connection {
             stream,
             receiver,
             error_sender,
-            orphan_notification_receiver,
             router_handle.clone(),
             connect_address,
         )
@@ -1446,7 +1473,6 @@ impl Connection {
         stream: TcpStream,
         receiver: mpsc::Receiver<Task>,
         error_sender: tokio::sync::oneshot::Sender<ConnectionError>,
-        orphan_notification_receiver: mpsc::UnboundedReceiver<RequestId>,
         router_handle: Arc<RouterHandle>,
         node_address: SocketAddr,
     ) -> Result<RemoteHandle<()>, std::io::Error> {
@@ -1455,7 +1481,6 @@ impl Connection {
             stream: impl AsyncRead + AsyncWrite + Send + 'static,
             receiver: mpsc::Receiver<Task>,
             error_sender: tokio::sync::oneshot::Sender<ConnectionError>,
-            orphan_notification_receiver: mpsc::UnboundedReceiver<RequestId>,
             router_handle: Arc<RouterHandle>,
             node_address: SocketAddr,
         ) -> RemoteHandle<()> {
@@ -1464,7 +1489,6 @@ impl Connection {
                 stream,
                 receiver,
                 error_sender,
-                orphan_notification_receiver,
                 router_handle,
                 node_address,
             )
@@ -1493,7 +1517,6 @@ impl Connection {
                         stream,
                         receiver,
                         error_sender,
-                        orphan_notification_receiver,
                         router_handle,
                         node_address,
                     )
@@ -1509,7 +1532,6 @@ impl Connection {
                         stream,
                         receiver,
                         error_sender,
-                        orphan_notification_receiver,
                         router_handle,
                         node_address,
                     )
@@ -1523,7 +1545,6 @@ impl Connection {
             stream,
             receiver,
             error_sender,
-            orphan_notification_receiver,
             router_handle,
             node_address,
         )
@@ -1535,7 +1556,6 @@ impl Connection {
         stream: impl AsyncRead + AsyncWrite,
         receiver: mpsc::Receiver<Task>,
         error_sender: tokio::sync::oneshot::Sender<ConnectionError>,
-        orphan_notification_receiver: mpsc::UnboundedReceiver<RequestId>,
         router_handle: Arc<RouterHandle>,
         node_address: SocketAddr,
     ) {
@@ -1557,7 +1577,7 @@ impl Connection {
         let write_coalescing_delay = config.write_coalescing_delay;
 
         let k = Self::keepaliver(
-            router_handle,
+            router_handle.clone(),
             config.keepalive_interval,
             config.keepalive_timeout,
             node_address,
@@ -1575,7 +1595,7 @@ impl Connection {
             receiver,
             write_coalescing_delay,
         );
-        let o = Self::orphaner(&handler_map, orphan_notification_receiver);
+        let o = Self::orphaner(&handler_map, &router_handle.orphaner_shared_state);
 
         let result = futures::try_join!(r, w, o, k);
 
@@ -1737,60 +1757,73 @@ impl Connection {
         Ok(())
     }
 
-    // This task receives notifications from `OrphanhoodNotifier`s and tries to
-    // mark streams as orphaned. It also checks count of old orphans periodically.
-    // After an ald orphan threshold is reached, `orphaner` returns an error
-    // causing the connection to break.
+    // The orphaner is responsible for preventing stream ID exhaustion caused by
+    // abandoned long-running requests. A request is considered "orphaned" when
+    // the receiving side of the oneshot that is used to pass the request back
+    // is dropped. The orphaner will close the connection if it detects that
+    // enough requests have been orphaned (`OLD_ORPHAN_COUNT_THRESHOLD`) for
+    // long enough (`OLD_AGE_ORPHAN_THRESHOLD`).
+    //
+    // The orphaner sits mostly idle and waits until enough orphans have been
+    // reported on this connection. When woken, it waits in a sleep-loop until
+    // enough orphans are old enough, and closes the connection if there are
+    // enough old orphans. If the number of orphans (new or old) drops below
+    // the threshold, it goes to sleep again and waits until more orphans
+    // are reported.
     async fn orphaner(
         handler_map: &StdMutex<ResponseHandlerMap>,
-        mut orphan_receiver: mpsc::UnboundedReceiver<RequestId>,
+        shared_state: &OrphanerSharedState,
     ) -> Result<(), BrokenConnectionError> {
-        let mut interval = tokio::time::interval(OLD_AGE_ORPHAN_THRESHOLD);
-        let mut current_orphans: HashMap<i16, Instant> = HashMap::new();
         loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    // We are guaranteed here that handler_map will not be locked
-                    // by anybody else, so we can do try_lock().unwrap()
-                    let handler_map_guard = handler_map.try_lock().unwrap();
-                    // Remove invalid orphans and count the old ones
-                    let mut old_orphan_count = 0;
-                    let now = Instant::now();
-                    current_orphans.retain(|stream_id, orphaned_at| {
-                        let Some(handler) = handler_map_guard.handlers.get(stream_id) else {
-                            return false;
-                        };
-                        if handler.is_valid() {
-                            return false;
-                        }
-                        if now - *orphaned_at >= OLD_AGE_ORPHAN_THRESHOLD {
+            let num_observed_orphan_reports = shared_state.wait_for_enough_reported_orphans().await;
+            assert!(num_observed_orphan_reports >= OLD_ORPHAN_COUNT_THRESHOLD);
+
+            let mut old_orphan_count = 0;
+            let mut new_orphan_count = 0;
+            {
+                // Handler map is guaranteed not to be acquired by anybody else
+                // because it can only be shared by other futures that are
+                // concurrently polled on the same task that this future executes on.
+                let mut handler_map_guard = handler_map.try_lock().unwrap();
+
+                for handler in handler_map_guard.handlers.values_mut() {
+                    match handler {
+                        ResponseHandlerMapEntry::Orphaned => {
                             old_orphan_count += 1;
                         }
-                        true
-                    });
-                    if old_orphan_count > OLD_ORPHAN_COUNT_THRESHOLD {
-                        warn!(
-                            "Too many old orphaned stream ids: {}",
-                            old_orphan_count,
-                        );
-                        return Err(BrokenConnectionErrorKind::TooManyOrphanedStreamIds(old_orphan_count as u16).into())
+                        ResponseHandlerMapEntry::Valid(response_handler) => {
+                            if response_handler.response_sender.is_closed() {
+                                *handler = ResponseHandlerMapEntry::Orphaned;
+                                new_orphan_count += 1;
+                            }
+                        }
                     }
                 }
-                Some(request_id) = orphan_receiver.recv() => {
-                    trace!(
-                        "Trying to orphan stream id associated with request_id = {}",
-                        request_id,
-                    );
-                    let mut handler_map_guard = handler_map.try_lock().unwrap(); // Same as above
-                    if let Some(stream_id) = handler_map_guard.orphan(request_id) {
-                        current_orphans.insert(stream_id, Instant::now());
-                    }
-                }
-                else => { break }
             }
-        }
 
-        Ok(())
+            let total_orphan_count = old_orphan_count + new_orphan_count;
+
+            if total_orphan_count < OLD_ORPHAN_COUNT_THRESHOLD {
+                // There are not enough orphans for the connection
+                // to be eligible to be closed. Adjust the counter so that
+                // we will wake up after `threshold - count` more orphans
+                // are reported.
+                shared_state
+                    .decrement_orphan_counter(num_observed_orphan_reports - total_orphan_count);
+            } else if old_orphan_count >= OLD_ORPHAN_COUNT_THRESHOLD {
+                return Err(BrokenConnectionErrorKind::TooManyOrphanedStreamIds(
+                    old_orphan_count as u16,
+                )
+                .into());
+            } else {
+                // If there are enough orphans in total but not enough
+                // old orphans, recheck after the delay. We don't touch
+                // the orphan counter here so `wait_for_enough_orphans`
+                // in the next iteration will return immediately.
+            }
+
+            tokio::time::sleep(OLD_AGE_ORPHAN_THRESHOLD).await;
+        }
     }
 
     async fn keepaliver(
@@ -2259,8 +2292,6 @@ fn setup_tcp_keepalive(sf: &SockRef<'_>, tcp_keepalive_interval: Duration) -> st
 struct ResponseHandlerMap {
     stream_set: StreamIdSet,
     handlers: HashMap<i16, ResponseHandlerMapEntry>,
-
-    request_to_stream: HashMap<RequestId, i16>,
 }
 
 enum ResponseHandlerMapEntry {
@@ -2275,10 +2306,6 @@ impl ResponseHandlerMapEntry {
             Self::Valid(response_handler) => Some(response_handler),
         }
     }
-
-    fn is_valid(&self) -> bool {
-        matches!(self, &Self::Valid(_))
-    }
 }
 
 enum HandlerLookupResult {
@@ -2292,14 +2319,11 @@ impl ResponseHandlerMap {
         Self {
             stream_set: StreamIdSet::new(),
             handlers: HashMap::new(),
-            request_to_stream: HashMap::new(),
         }
     }
 
     fn allocate(&mut self, response_handler: ResponseHandler) -> Result<i16, ResponseHandler> {
         if let Some(stream_id) = self.stream_set.allocate() {
-            self.request_to_stream
-                .insert(response_handler.request_id, stream_id);
             let prev_handler = self
                 .handlers
                 .insert(stream_id, ResponseHandlerMapEntry::Valid(response_handler));
@@ -2308,23 +2332,6 @@ impl ResponseHandlerMap {
             Ok(stream_id)
         } else {
             Err(response_handler)
-        }
-    }
-
-    // Orphan stream_id (associated with this request_id) by setting its
-    // response handler map entry to `Orphaned`
-    fn orphan(&mut self, request_id: RequestId) -> Option<i16> {
-        if let Some(stream_id) = self.request_to_stream.get(&request_id) {
-            debug!(
-                "Orphaning stream_id = {} associated with request_id = {}",
-                stream_id, request_id
-            );
-            *self.handlers.get_mut(stream_id).unwrap() = ResponseHandlerMapEntry::Orphaned;
-            let stream_id = *stream_id;
-            self.request_to_stream.remove(&request_id);
-            Some(stream_id)
-        } else {
-            None
         }
     }
 
@@ -2338,13 +2345,7 @@ impl ResponseHandlerMap {
                     // This is a valid state (as opposed to missing handler)
                     HandlerLookupResult::Orphaned
                 }
-                ResponseHandlerMapEntry::Valid(handler) => {
-                    // A mapping `request_id` -> `stream_id` must be removed, to
-                    // prevent marking this `stream_id` as orphaned by some late
-                    // orphan notification.
-                    self.request_to_stream.remove(&handler.request_id);
-                    HandlerLookupResult::Handler(handler)
-                }
+                ResponseHandlerMapEntry::Valid(handler) => HandlerLookupResult::Handler(handler),
             }
         } else {
             HandlerLookupResult::Missing
@@ -3229,7 +3230,7 @@ mod tests {
 
         // Wait for the first half of requests to expire, and for the orphaner
         // to run
-        tokio::time::sleep(super::OLD_AGE_ORPHAN_THRESHOLD * 3).await;
+        tokio::time::sleep(super::OLD_AGE_ORPHAN_THRESHOLD * 10).await;
 
         for _ in 0..super::OLD_ORPHAN_COUNT_THRESHOLD / 2 {
             let conn = Arc::clone(&conn);
